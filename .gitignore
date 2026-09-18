@@ -1,0 +1,20 @@
+# The fixture is a git repo of its own so the harness can reset between trials.
+# Tracking it from the parent would create an embedded gitlink that nobody can
+# clone usefully, so the harness recreates it from fixture-seed instead.
+plugins/context-diet/fixture/.git/
+plugins/context-diet/fixture/node_modules/
+plugins/context-diet/fixture/answer.txt
+
+# Local environment, not part of the plugin.
+.venv/
+.uv-cache/
+.tiktoken-cache/
+
+# Measurement output belongs to the machine that produced it.
+.claude/context-diet/
+out/
+**/__pycache__/
+*.pyc
+
+# Generated fixtures. Rebuild with tests/make_fixtures.py --heavy.
+plugins/context-diet/tests/fixtures/big-store/

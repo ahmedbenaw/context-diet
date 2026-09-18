@@ -1,0 +1,17 @@
+{
+  "name": "context-diet-fixture",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic throwaway repo the context-diet A/B harness runs agent tasks against.",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "autoCompactWindow": 500000,
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /h/.claude/hooks/x.sh",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/x.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

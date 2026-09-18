@@ -1,0 +1,2 @@
+{"type": "assistant", "sessionId": "fixture", "uuid": "u1789774629886000000", "message": {"role": "assistant", "model": "claude-opus-5", "content": [], "usage": {"input_tokens": 2, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 0, "output_tokens": 50}}}
+{"type": "assistant", "sessionId": "fixture", "uuid": "u1789774629886002000", "message": {"role": "assistant", "model": "claude-opus-5"

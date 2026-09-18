@@ -1,0 +1,19 @@
+{
+  "amber": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/amber.jsonl",
+  "big_store": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/big-store",
+  "corrupt": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/corrupt.jsonl",
+  "duplicate_settings": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/settings/settings-duplicate.json",
+  "green": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/green.jsonl",
+  "hooks_over": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/hooks-over.jsonl",
+  "hooks_under": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/hooks-under.jsonl",
+  "instruction_reads": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/instruction-reads.jsonl",
+  "instructions": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/instructions/CLAUDE.md",
+  "prefix_over": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/prefix-over.jsonl",
+  "prefix_under": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/prefix-under.jsonl",
+  "red": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/red.jsonl",
+  "repeat_reads": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/repeat-reads.jsonl",
+  "stores": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/stores",
+  "truncated": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/truncated.jsonl",
+  "two_model": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/two-model.jsonl",
+  "unknown_model": "/Users/ben/Claude/Projects/context-diet/plugins/context-diet/tests/fixtures/transcripts/unknown-model.jsonl"
+}

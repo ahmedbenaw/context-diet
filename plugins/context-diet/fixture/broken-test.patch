@@ -1,0 +1,13 @@
+diff --git a/src/services/pricing.ts b/src/services/pricing.ts
+index 60ca2b9..09140b1 100644
+--- a/src/services/pricing.ts
++++ b/src/services/pricing.ts
+@@ -12,7 +12,7 @@ export function computeLineTotalCents(line: OrderLine): number {
+ export function applyDiscountPercent(cents: number, percent: number): number {
+   if (percent <= 0) return cents;
+   const capped = Math.min(percent, 100);
+-  return Math.round((cents * (100 - capped)) / 100);
++  return Math.floor((cents * (100 - capped)) / 100);
+ }
+ 
+ /** Subtotal of every line, then the order-level discount. */

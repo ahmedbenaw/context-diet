@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "mlflow-mcp": {
+      "args": [
+        "run",
+        "--with",
+        "mlflow[mcp]>=3.5.1",
+        "mlflow",
+        "mcp",
+        "run"
+      ],
+      "command": "uv",
+      "env": {
+        "MLFLOW_TRACKING_URI": "file:///Users/ben/Claude/Projects/context-diet/.claude/context-diet/mlruns"
+      }
+    }
+  }
+}

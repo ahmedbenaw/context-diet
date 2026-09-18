@@ -1,0 +1,56 @@
+# decisions.tsv — one row per hypothesis verdict, per unit, per self-heal action
+ts	kind	subject	value	note
+2026-09-19T02:24:55	census-verdict	claude-opus-4-8/H1	REFUTED	**H1 REFUTED** - 0 of 582 Read calls (0.0%) targeted an instruction file by name (CLAUDE.md or AGENTS.md). A further 333 targeted other files under a .claude directory, which is a different cost with a different fix.
+2026-09-19T02:24:55	census-verdict	claude-opus-4-8/H2	SUPPORTED	**H2 SUPPORTED, accumulated output drives cost** - median static prefix 1,806 tokens, median cache-read growth across a session 77,231 tokens; largest single tool result 534,578 bytes from Read.
+2026-09-19T02:24:55	census-verdict	claude-opus-4-8/H3	SUPPORTED	**H3 SUPPORTED** - median hook wall-clock per session 218,272 ms.
+2026-09-19T02:24:55	census-verdict	claude-opus-4-8/H4	SUPPORTED	**H4 SUPPORTED** - median injected context 35,723 bytes per session; top injector SessionStart:compact at 77,850 bytes.
+2026-09-19T02:24:55	census-verdict	claude-opus-5/H1	REFUTED	**H1 REFUTED** - 9 of 334 Read calls (2.7%) targeted an instruction file by name (CLAUDE.md or AGENTS.md). A further 70 targeted other files under a .claude directory, which is a different cost with a different fix.
+2026-09-19T02:24:55	census-verdict	claude-opus-5/H2	SUPPORTED	**H2 SUPPORTED, accumulated output drives cost** - median static prefix 37,951 tokens, median cache-read growth across a session 83,358 tokens; largest single tool result 431,481 bytes from mcp__claude-in-chrome__browser
+2026-09-19T02:24:55	census-verdict	claude-opus-5/H3	REFUTED	**H3 REFUTED** - median hook wall-clock per session 360 ms.
+2026-09-19T02:24:55	census-verdict	claude-opus-5/H4	REFUTED	**H4 REFUTED** - median injected context 360 bytes per session; top injector SessionStart:compact at 339,106 bytes.
+2026-09-19T02:24:55	census-verdict	claude-fable-5/H1	REFUTED	**H1 REFUTED** - 0 of 182 Read calls (0.0%) targeted an instruction file by name (CLAUDE.md or AGENTS.md). A further 76 targeted other files under a .claude directory, which is a different cost with a different fix.
+2026-09-19T02:24:55	census-verdict	claude-fable-5/H2	SUPPORTED	**H2 SUPPORTED, accumulated output drives cost** - median static prefix 55,255 tokens, median cache-read growth across a session 148,922 tokens; largest single tool result 542,886 bytes from Read.
+2026-09-19T02:24:55	census-verdict	claude-fable-5/H3	SUPPORTED	**H3 SUPPORTED** - median hook wall-clock per session 171,399 ms.
+2026-09-19T02:24:55	census-verdict	claude-fable-5/H4	SUPPORTED	**H4 SUPPORTED** - median injected context 53,511 bytes per session; top injector SessionStart:compact at 173,001 bytes.
+2026-09-19T02:24:55	census-verdict	claude-fable-5-1/H1	REFUTED	**H1 REFUTED** - 0 of 113 Read calls (0.0%) targeted an instruction file by name (CLAUDE.md or AGENTS.md). A further 2 targeted other files under a .claude directory, which is a different cost with a different fix.
+2026-09-19T02:24:55	census-verdict	claude-fable-5-1/H2	SUPPORTED	**H2 SUPPORTED, accumulated output drives cost** - median static prefix 71,279 tokens, median cache-read growth across a session 144,384 tokens; largest single tool result 679,566 bytes from Read.
+2026-09-19T02:24:55	census-verdict	claude-fable-5-1/H3	SUPPORTED	**H3 SUPPORTED** - median hook wall-clock per session 438,386 ms.
+2026-09-19T02:24:55	census-verdict	claude-fable-5-1/H4	SUPPORTED	**H4 SUPPORTED** - median injected context 43,353 bytes per session; top injector SessionStart:compact at 157,251 bytes.
+2026-09-19T02:24:55	census-verdict	claude-haiku-4-5-20251001/H1	REFUTED	**H1 REFUTED** - 0 of 207 Read calls (0.0%) targeted an instruction file by name (CLAUDE.md or AGENTS.md). A further 146 targeted other files under a .claude directory, which is a different cost with a different fix.
+2026-09-19T02:24:55	census-verdict	claude-haiku-4-5-20251001/H2	SUPPORTED	**H2 SUPPORTED, accumulated output drives cost** - median static prefix 30,622 tokens, median cache-read growth across a session 60,665 tokens; largest single tool result 42,898 bytes from WebFetch.
+2026-09-19T02:24:55	census-verdict	claude-haiku-4-5-20251001/H3	REFUTED	**H3 REFUTED** - median hook wall-clock per session 0 ms.
+2026-09-19T02:24:55	census-verdict	claude-haiku-4-5-20251001/H4	REFUTED	**H4 REFUTED** - median injected context 0 bytes per session; top injector none at 0 bytes.
+2026-09-19T02:24:55	census-verdict	claude-sonnet-5/H1	REFUTED	**H1 REFUTED** - 0 of 63 Read calls (0.0%) targeted an instruction file by name (CLAUDE.md or AGENTS.md). A further 4 targeted other files under a .claude directory, which is a different cost with a different fix.
+2026-09-19T02:24:55	census-verdict	claude-sonnet-5/H2	SUPPORTED	**H2 SUPPORTED, accumulated output drives cost** - median static prefix 39,361 tokens, median cache-read growth across a session 72,150 tokens; largest single tool result 110,307 bytes from mcp__claude-in-chrome__compute
+2026-09-19T02:24:55	census-verdict	claude-sonnet-5/H3	REFUTED	**H3 REFUTED** - median hook wall-clock per session 0 ms.
+2026-09-19T02:24:55	census-verdict	claude-sonnet-5/H4	REFUTED	**H4 REFUTED** - median injected context 0 bytes per session; top injector SessionStart:compact at 20,930 bytes.
+2026-09-19T02:31:51+03:00	finding	security-guidance PostToolUse:Bash	5	five byte-identical registrations of security_reminder_hook.py on every Bash call; confirmed by reading hooks.json directly
+2026-09-19T02:31:51+03:00	finding	forge/inject-memory.sh SessionStart	2	registered twice in settings.json, once absolute once via \$HOME
+2026-09-19T02:40:53	apply	CLAUDE.md ## Style	12	bucket=Ritual reason=Ritual backup=20260919-024053
+2026-09-19T02:40:53	revert	/private/tmp/claude-501/cd-patch-frtvuci3/CLAUDE.md	3ba5f497955c	from 20260919-024053
+2026-09-19T02:46:57+03:00	deviation	mlflow tracking store	sqlite	spec said a local file store; MLflow 3.16 put the filesystem backend in maintenance mode and raises. SQLite is still local, still needs no server and makes no network call. MLFLOW_ALLOW_FILE_STORE=true restores the old behaviour.
+2026-09-19T02:47:48	apply	CLAUDE.md ## Style	12	bucket=Ritual reason=Ritual backup=20260919-024748
+2026-09-19T02:47:49	revert	/private/tmp/claude-501/cd-patch-htkvs_g7/CLAUDE.md	3ba5f497955c	from 20260919-024748
+2026-09-19T02:49:31	apply	CLAUDE.md ## Style	12	bucket=Ritual reason=Ritual backup=20260919-024931
+2026-09-19T02:49:32	revert	/private/tmp/claude-501/cd-patch-pmtw8tlf/CLAUDE.md	3ba5f497955c	from 20260919-024931
+2026-09-19T02:52:38	apply	CLAUDE.md ## Working style	50	bucket=Ritual reason=Ceremony with no behavioural effect. Nothing here changes what the agent does. backup=20260919-025238
+2026-09-19T02:52:38	apply	CLAUDE.md ## Before you start	53	bucket=Policy reason=Standing behaviour phrased as prose. A hook enforces this for nothing per turn. backup=20260919-025238
+2026-09-19T02:52:38	apply	CLAUDE.md ## Legacy notes for older models	63	bucket=Legacy reason=A workaround for a model no longer in use. Dated and logged, recoverable from the backup. backup=20260919-025238
+2026-09-19T02:52:38	apply	CLAUDE.md ## Testing	22	bucket=Duplicate reason=Both commands are already stated under Commands. Collapse to one home. backup=20260919-025238
+2026-09-19T02:52:38	apply	CLAUDE.md ## Philosophy	52	bucket=Unverifiable reason=Opinion with no test attached. Belongs in a reference file, not the always-on layer. backup=20260919-025238
+2026-09-19T02:53:11	apply	CLAUDE.md ## Working style	50	bucket=Ritual reason=Ceremony with no behavioural effect. Nothing here changes what the agent does. backup=20260919-025311
+2026-09-19T02:53:11	apply	CLAUDE.md ## Before you start	53	bucket=Policy reason=Standing behaviour phrased as prose. A hook enforces this for nothing per turn. backup=20260919-025311
+2026-09-19T02:53:11	apply	CLAUDE.md ## Legacy notes for older models	63	bucket=Legacy reason=A workaround for a model no longer in use. Dated and logged, recoverable from the backup. backup=20260919-025311
+2026-09-19T02:53:11	apply	CLAUDE.md ## Testing	22	bucket=Duplicate reason=Both commands are already stated under Commands. Collapse to one home. backup=20260919-025311
+2026-09-19T02:53:11	apply	CLAUDE.md ## Philosophy	52	bucket=Unverifiable reason=Opinion with no test attached. Belongs in a reference file, not the always-on layer. backup=20260919-025311
+2026-09-19T02:53:11	revert	/Users/ben/Claude/Projects/context-diet/plugins/context-diet/fixture/CLAUDE.md	ec9e6dcaec64	from 20260919-025311
+2026-09-19T02:53:12	apply	CLAUDE.md ## Style	12	bucket=Ritual reason=Ritual backup=20260919-025312
+2026-09-19T02:53:12	apply	CLAUDE.md ## Legacy	14	bucket=Legacy reason=Legacy backup=20260919-025312
+2026-09-19T02:53:12	apply	CLAUDE.md ## Duplicate	9	bucket=Duplicate reason=Duplicate backup=20260919-025312
+2026-09-19T02:53:12	revert	/private/tmp/claude-501/cd-patch-rkg8tiko/CLAUDE.md	3ba5f497955c	from 20260919-025312
+2026-09-19T02:53:41	apply	CLAUDE.md ## Style	12	bucket=Ritual reason=Ritual backup=20260919-025341
+2026-09-19T02:53:41	apply	CLAUDE.md ## Legacy	14	bucket=Legacy reason=Legacy backup=20260919-025341
+2026-09-19T02:53:41	apply	CLAUDE.md ## Duplicate	9	bucket=Duplicate reason=Duplicate backup=20260919-025341
+2026-09-19T02:53:41	revert	/private/tmp/claude-501/cd-patch-pji217cw/CLAUDE.md	3ba5f497955c	from 20260919-025341
+2026-09-19T02:53:44+03:00	fixture	lean variant	683 vs 923 tokens	Fat carries realistic Ritual, Legacy, Duplicate and Unverifiable sections; Lean is the audited file with both Fact sections kept
+2026-09-19T02:53:44+03:00	defect-fixed	patch.py backup	per-cut backup	backing the same file up once per cut overwrote the original with modified text; now every distinct file is backed up once before any edit, and the gate uses a three-cut plan that catches it

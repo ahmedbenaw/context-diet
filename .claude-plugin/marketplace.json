@@ -1,0 +1,11 @@
+{
+  "name": "context-diet-marketplace",
+  "owner": {"name": "Ben"},
+  "plugins": [
+    {
+      "name": "context-diet",
+      "source": "./plugins/context-diet",
+      "description": "Measure the context layer, cut by evidence, watch occupancy, hand off before compaction."
+    }
+  ]
+}

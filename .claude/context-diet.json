@@ -1,0 +1,37 @@
+{
+  "_comment": "Every threshold context-diet compares against lives here. The first run prints the effective table once, so a wrong default is visible before it misfires. Delete any key to fall back to the built-in default.",
+  "ceiling_tokens": 4000,
+  "repeat_read_threshold": 3,
+  "guard_mode": "warn",
+  "tokenizer": "auto",
+  "amber": 0.5,
+  "red": 0.7,
+  "unknown_model_policy": "pause",
+  "context_windows": {
+    "claude-opus-5": {
+      "window": 500000,
+      "source": "autoCompactWindow in ~/.claude/settings.json on this machine, read 2026-09-19"
+    },
+    "claude-fable-5-1": {
+      "window": 500000,
+      "source": "autoCompactWindow in ~/.claude/settings.json on this machine, read 2026-09-19"
+    }
+  },
+  "_context_windows_note": "Only models whose window was actually read from this machine are listed. A model that is absent pauses monitoring for that session and says so, rather than guessing a denominator. A wrong denominator makes every threshold wrong.",
+  "mlflow_tracking_uri": "sqlite:///./.claude/context-diet/mlflow.db",
+  "static_prefix_tokens": 60000,
+  "hook_latency_ms_per_tool_call": 2000,
+  "hook_injected_bytes_per_session": 4000,
+  "plan_window_fraction": 0.8,
+  "transcript_store_bytes": 1000000000,
+  "transcript_store_files": 1000,
+  "backups_store_bytes": 100000000,
+  "mlflow_store_bytes": 100000000,
+  "stale_handoff_days": 7,
+  "ledger_bytes": 10000000,
+  "storage_signal_ttl_seconds": 86400,
+  "session_start_budget_ms": 200,
+  "monitor_budget_ms": 50,
+  "duplicate_hook_registrations": 1,
+  "_mlflow_note": "MLflow 3.16 put the filesystem tracking store into maintenance mode, so the default is a local SQLite file. It still needs no server and makes no network call. Set MLFLOW_ALLOW_FILE_STORE=true to go back to a file store."
+}
