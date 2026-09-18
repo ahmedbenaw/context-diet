@@ -53,7 +53,8 @@ one, because `patch.py` opens exactly what the `file` field says.
 
 ## 2. Pricing a parent section
 
-Input file: `plugins/context-diet/fixture/CLAUDE.md`, 683 tokens.
+Input file: `plugins/context-diet/fixture/CLAUDE.md`, 923 tokens. Its first
+seven sections:
 
 | heading | level | tokens |
 |---|---|---|
@@ -65,10 +66,12 @@ Input file: `plugins/context-diet/fixture/CLAUDE.md`, 683 tokens.
 | `### 3. Services return result objects and never throw` | 3 | 67 |
 | `## Gotchas` | 2 | 162 |
 
-Sum: 63 + 167 + 4 + 100 + 120 + 67 + 162 = 683, matching the file total. The
-backticks around `.ts` in the second convention's real heading are dropped in
-this table for readability, which is why the row carries its id. A plan carries
-the heading exactly as `extract.py` printed it.
+These seven sum to 683. The other five are in example 4, and all twelve
+reconcile to the 923 the file total reported.
+
+The backticks around `.ts` in the second convention's real heading are dropped
+in this table for readability, which is why that row carries its id. A plan
+carries the heading exactly as `extract.py` printed it.
 
 `## Conventions` has 4 tokens of its own. A cut on it priced at 4 is wrong.
 `patch.py` deletes to the next heading of the same or higher level, which is
@@ -106,30 +109,33 @@ Copy the heading from the extract's `heading` field, including any backticks.
 `patch.py` compares the stripped line, so a retyped heading with a straightened
 backtick will not match and the cut is skipped.
 
-## 4. An opinion and a standing behaviour
+## 4. An opinion, a ritual, a standing behaviour and a legacy note
 
-Measured on a two-section scratch file, 62 tokens total.
+The remaining five sections of the same file, 240 tokens between them.
 
-```
-## Design taste
+| id | heading | tokens | bucket | why |
+|---|---|---|---|---|
+| CLAUDE.md#e077725b | `## Working style` | 50 | Ritual | "Always be thorough", "take pride", "quality matters more than speed, except when speed matters more". Nothing to run, nothing to check. |
+| CLAUDE.md#ebb910b3 | `## Before you start` | 53 | Policy | "From now on", "before every task", "after each file" is standing behaviour. Keep the rule, move the enforcement: a UserPromptSubmit hook can restate the task and a Stop hook can list changed files, for a fraction of 53 tokens every turn. |
+| CLAUDE.md#bc4c9780 | `## Legacy notes for older models` | 63 | Legacy | A ten-line edit limit written for an older model, kept in case of a rollback. Dated, and the rollback note goes in the reason. |
+| CLAUDE.md#aa45629c | `## Testing` | 22 | Duplicate | `npm test` and `npm run typecheck` are already in the `## Commands` table at CLAUDE.md#9fc03d2d. |
+| CLAUDE.md#f8ebca2a | `## Philosophy` | 52 | Unverifiable | "Naming is the hardest problem", "prefer clarity over cleverness". No test decides whether it was followed. |
 
-Prefer functional composition over class hierarchies. Deep conditional nesting
-is a smell and should be flattened wherever it appears.
+Whole-file reconciliation: 63 + 167 + 4 + 100 + 120 + 67 + 162 + 50 + 53 + 63 +
+22 + 52 = 923, the file total `extract.py` reported.
 
-## Workflow
+Before and after: 923 tokens, 187 cut (Working style, Legacy notes, Testing and
+Philosophy), 736 kept, a 20 percent reduction. `## Before you start` stays in
+`keep` because the hook that would replace it does not exist yet. Proposing a
+cut against a hook nobody has written is a saving that does not happen.
 
-From now on, run the full test suite before every commit, and after each task
-write a one-line summary of what changed.
-```
+Two of these need care:
 
-| heading | tokens | bucket | action |
-|---|---|---|---|
-| `## Design taste` | 29 | Unverifiable | Cut, reason names the reference file it moves to. Nothing checks "is a smell". |
-| `## Workflow` | 30 | Policy | Keep, and name the hook. "From now on", "before every" and "after each" are standing behaviour, which a Stop hook enforces once instead of 30 tokens every turn. |
-
-If a Stop hook already runs the suite, `## Workflow` is a Duplicate, not a
-Policy, and the prose copy is the cut. Check `hook_audit.py --json` before
-deciding.
+- `## Philosophy` is a demotion, not a deletion. Its `reason` names the file it
+  moves to, and the text is recoverable from the backup `patch.py` writes.
+- `## Testing` is the cut copy and `## Commands` is the home. Both entries name
+  the other's id, and the saving is 22, not 189. Counting the survivor into the
+  saving is the most common way a report overstates itself.
 
 ## 5. The honest answer
 

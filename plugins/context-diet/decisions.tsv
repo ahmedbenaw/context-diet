@@ -54,3 +54,15 @@ ts	kind	subject	value	note
 2026-09-19T02:53:41	revert	/private/tmp/claude-501/cd-patch-pji217cw/CLAUDE.md	3ba5f497955c	from 20260919-025341
 2026-09-19T02:53:44+03:00	fixture	lean variant	683 vs 923 tokens	Fat carries realistic Ritual, Legacy, Duplicate and Unverifiable sections; Lean is the audited file with both Fact sections kept
 2026-09-19T02:53:44+03:00	defect-fixed	patch.py backup	per-cut backup	backing the same file up once per cut overwrote the original with modified text; now every distinct file is backed up once before any edit, and the gate uses a three-cut plan that catches it
+2026-09-19T02:54:29	apply	CLAUDE.md ## Style	12	bucket=Ritual reason=Ritual backup=20260919-025429
+2026-09-19T02:54:29	apply	CLAUDE.md ## Legacy	14	bucket=Legacy reason=Legacy backup=20260919-025429
+2026-09-19T02:54:29	apply	CLAUDE.md ## Duplicate	9	bucket=Duplicate reason=Duplicate backup=20260919-025429
+2026-09-19T02:54:29	revert	/private/tmp/claude-501/cd-patch-eoplbwve/CLAUDE.md	3ba5f497955c	from 20260919-025429
+2026-09-19T02:59:14	apply	CLAUDE.md ## Style	12	bucket=Ritual reason=Ritual backup=20260919-025914
+2026-09-19T02:59:14	apply	CLAUDE.md ## Legacy	14	bucket=Legacy reason=Legacy backup=20260919-025914
+2026-09-19T02:59:14	apply	CLAUDE.md ## Duplicate	9	bucket=Duplicate reason=Duplicate backup=20260919-025914
+2026-09-19T02:59:14	revert	/private/tmp/claude-501/cd-patch-pnd5p0c6/CLAUDE.md	3ba5f497955c	from 20260919-025914
+2026-09-19T02:59:32	apply	CLAUDE.md ## Style	12	bucket=Ritual reason=Ritual backup=20260919-025932
+2026-09-19T02:59:32	apply	CLAUDE.md ## Legacy	14	bucket=Legacy reason=Legacy backup=20260919-025932
+2026-09-19T02:59:32	apply	CLAUDE.md ## Duplicate	9	bucket=Duplicate reason=Duplicate backup=20260919-025932
+2026-09-19T02:59:32	revert	/private/tmp/claude-501/cd-patch-cr2yc6z4/CLAUDE.md	3ba5f497955c	from 20260919-025932

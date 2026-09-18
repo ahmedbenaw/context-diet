@@ -233,6 +233,9 @@ def run_trial(model: str, config: str, task: dict, trial: int, dry_run: bool,
         cwd=str(ws), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3600,
     )
     record["wall_ms"] = int((time.time() - started) * 1000)
+    def note(text: str) -> None:
+        record["note"] = (record["note"] + " " if record["note"] else "") + text
+
     try:
         data = json.loads(proc.stdout.decode("utf-8", "replace"))
         usage = data.get("usage") or {}
@@ -240,9 +243,16 @@ def run_trial(model: str, config: str, task: dict, trial: int, dry_run: bool,
         record["cache_creation"] = int(usage.get("cache_creation_input_tokens") or 0)
         record["cache_read"] = int(usage.get("cache_read_input_tokens") or 0)
         record["output"] = int(usage.get("output_tokens") or 0)
+        record["num_turns"] = int(data.get("num_turns") or 0)
+        # A runner that fails to authenticate returns a well formed object full
+        # of zeros. Without this check the run would look like a cheap success.
+        if data.get("is_error"):
+            note("agent run failed: %s" % str(data.get("result") or
+                                              data.get("terminal_reason") or "unknown")[:160])
+        elif record["fresh_input"] == 0 and record["cache_read"] == 0:
+            note("agent reported zero tokens; the token columns carry no information")
     except Exception:
-        record["note"] = (record["note"] + " " if record["note"] else "") + \
-            "agent output was not parseable json; token columns are zero, not estimated"
+        note("agent output was not parseable json; token columns are zero, not estimated")
 
     passed, _ms, _tail = run_check(task["check"], ws)
     record["passed"] = passed

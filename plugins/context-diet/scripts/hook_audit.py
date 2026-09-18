@@ -83,44 +83,82 @@ def collect_plugin_hooks() -> list:
     rows = []
     roots = [HOME / "plugins" / "marketplaces"]
     seen = set()
+
+    # A marketplace added from a local path is never copied into the cache, so a
+    # scan of the cache alone misses every plugin installed that way. Its
+    # plugins are read through its manifest, never by walking the directory: a
+    # local marketplace often sits inside a working repo, and walking it would
+    # report a hooks.json belonging to some library in a virtualenv as if it
+    # were a registered hook.
+    local_plugin_dirs = []
+    for entry in (claude_settings().get("extraKnownMarketplaces") or {}).values():
+        source = entry.get("source") if isinstance(entry, dict) else None
+        path = source.get("path") if isinstance(source, dict) else source
+        if not isinstance(path, str) or not path:
+            continue
+        base = Path(path).expanduser()
+        manifest = base / ".claude-plugin" / "marketplace.json"
+        if not manifest.is_file():
+            continue
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for plugin in data.get("plugins") or []:
+            src = plugin.get("source") if isinstance(plugin, dict) else None
+            if isinstance(src, str):
+                candidate = (base / src).resolve()
+                if candidate.is_dir():
+                    local_plugin_dirs.append(candidate)
+
+    for plugin_dir in local_plugin_dirs:
+        hooks_json = plugin_dir / "hooks" / "hooks.json"
+        if hooks_json.is_file():
+            rows.extend(_read_hooks_file(hooks_json, seen))
     for root in roots:
         if not root.is_dir():
             continue
         for hooks_json in root.rglob("hooks/hooks.json"):
-            key = str(hooks_json.resolve())
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                data = json.loads(hooks_json.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            events = data.get("hooks") if isinstance(data.get("hooks"), dict) else data
-            if not isinstance(events, dict):
-                continue
-            plugin_root = hooks_json.parent.parent
-            for event, matchers in events.items():
-                if not isinstance(matchers, list):
-                    continue
-                for matcher in matchers:
-                    for hook in (matcher or {}).get("hooks") or []:
-                        cmd = hook.get("command", "")
-                        # ${CLAUDE_PLUGIN_ROOT} is literal text in the file. Two
-                        # plugins shipping the same command text are not running
-                        # the same script, so the variable is resolved before the
-                        # duplicate comparison.
-                        resolved = cmd.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin_root))
-                        resolved = resolved.replace("$CLAUDE_PLUGIN_ROOT", str(plugin_root))
-                        rows.append(
-                            {
-                                "source": str(hooks_json),
-                                "event": event,
-                                "matcher": (matcher or {}).get("matcher", ""),
-                                "command": cmd,
-                                "normalized": expand(resolved),
-                                "timeout": hook.get("timeout"),
-                            }
-                        )
+            rows.extend(_read_hooks_file(hooks_json, seen))
+    return rows
+
+
+def _read_hooks_file(hooks_json: Path, seen: set) -> list:
+    """Parse one hooks.json into rows, resolving the plugin root variable."""
+    rows = []
+    key = str(hooks_json.resolve())
+    if key in seen:
+        return rows
+    seen.add(key)
+    try:
+        data = json.loads(hooks_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return rows
+    events = data.get("hooks") if isinstance(data.get("hooks"), dict) else data
+    if not isinstance(events, dict):
+        return rows
+    plugin_root = hooks_json.parent.parent
+    for event, matchers in events.items():
+        if not isinstance(matchers, list):
+            continue
+        for matcher in matchers:
+            for hook in (matcher or {}).get("hooks") or []:
+                cmd = hook.get("command", "")
+                # ${CLAUDE_PLUGIN_ROOT} is literal text in the file. Two plugins
+                # shipping the same command text are not running the same
+                # script, so the variable is resolved before comparison.
+                resolved = cmd.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin_root))
+                resolved = resolved.replace("$CLAUDE_PLUGIN_ROOT", str(plugin_root))
+                rows.append(
+                    {
+                        "source": str(hooks_json),
+                        "event": event,
+                        "matcher": (matcher or {}).get("matcher", ""),
+                        "command": cmd,
+                        "normalized": expand(resolved),
+                        "timeout": hook.get("timeout"),
+                    }
+                )
     return rows
 
 
