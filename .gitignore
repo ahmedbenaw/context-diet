@@ -18,3 +18,6 @@ out/
 
 # Generated fixtures. Rebuild with tests/make_fixtures.py --heavy.
 plugins/context-diet/tests/fixtures/big-store/
+
+# Local hookify rules, personal to this machine
+.claude/hookify.*.local.md
