@@ -55,7 +55,7 @@ And five hooks that run on their own, from the start of a session and throughout
 ## Install
 
 ```bash
-git clone https://github.com/<owner>/context-diet.git
+git clone https://github.com/ahmedbenaw/context-diet.git
 cd context-diet
 ```
 
@@ -111,6 +111,15 @@ python3 plugins/context-diet/tests/run_gates.py
 ```
 
 Thirty-three checks, each one a command rather than an opinion. They cover the census, the monitor's silence below threshold, its 50 ms budget, the unknown-model pause, the manifest round trip, apply and revert being byte-identical, the refusal to write outside the instruction layer, storage signals deleting nothing, and the report refusing to state a difference smaller than its own spread.
+
+## Running the A/B yourself
+
+```bash
+python3 plugins/context-diet/scripts/measure.py run --models claude-opus-5,claude-fable-5-1 --trials 3
+python3 plugins/context-diet/scripts/report.py --runs .claude/context-diet/ab/runs.tsv
+```
+
+That is 45 runs per model, and it needs a headless runner that is signed in. If the runner cannot authenticate, every trial records the failure in its note rather than reporting zero tokens as if the run were cheap. The plumbing is verified separately with `--dry-run`, where every pass check correctly fails because no agent did any work.
 
 ## Known limits
 
