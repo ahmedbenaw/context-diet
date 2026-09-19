@@ -114,12 +114,49 @@ Thirty-three checks, each one a command rather than an opinion. They cover the c
 
 ## Running the A/B yourself
 
+The harness drives `claude -p`, so that command has to be signed in. Check it first:
+
+```bash
+claude auth status
+```
+
+If it reports `"loggedIn": false`, sign in again. Either command works, and the second one is the documented path for unattended runs:
+
+```bash
+claude auth login
+```
+
+```bash
+claude setup-token
+```
+
+Then run the matrix and the report:
+
 ```bash
 python3 plugins/context-diet/scripts/measure.py run --models claude-opus-5,claude-fable-5-1 --trials 3
+```
+
+```bash
 python3 plugins/context-diet/scripts/report.py --runs .claude/context-diet/ab/runs.tsv
 ```
 
-That is 45 runs per model, and it needs a headless runner that is signed in. If the runner cannot authenticate, every trial records the failure in its note rather than reporting zero tokens as if the run were cheap. The plumbing is verified separately with `--dry-run`, where every pass check correctly fails because no agent did any work.
+That is 45 runs per model. If the runner cannot authenticate, every trial records the failure in its note rather than reporting zero tokens as if the run were cheap. The plumbing is verified separately with `--dry-run`, where every pass check correctly fails because no agent did any work.
+
+## Checking that the hooks fire
+
+Registering a hook is not the same as watching it run. Hooks load when a session starts, so the session that installs the plugin never runs them. Start a fresh session, do any small task, end it, then look for the row the Stop hook appends:
+
+```bash
+cat .claude/context-diet/ledger.tsv
+```
+
+One row means the Stop hook fired. For the rest, run the census over that session's transcript and read its hook columns:
+
+```bash
+python3 plugins/context-diet/scripts/context_census.py --out census.tsv
+```
+
+The plugin's own hooks are expected to cost under 200 ms in total for that session. Over that, it fails its own gate.
 
 ## Known limits
 

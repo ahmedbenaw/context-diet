@@ -66,3 +66,10 @@ ts	kind	subject	value	note
 2026-09-19T02:59:32	apply	CLAUDE.md ## Legacy	14	bucket=Legacy reason=Legacy backup=20260919-025932
 2026-09-19T02:59:32	apply	CLAUDE.md ## Duplicate	9	bucket=Duplicate reason=Duplicate backup=20260919-025932
 2026-09-19T02:59:32	revert	/private/tmp/claude-501/cd-patch-cr2yc6z4/CLAUDE.md	3ba5f497955c	from 20260919-025932
+2026-09-19T03:03:01	apply	CLAUDE.md ## Style	12	bucket=Ritual reason=Ritual backup=20260919-030301
+2026-09-19T03:03:01	apply	CLAUDE.md ## Legacy	14	bucket=Legacy reason=Legacy backup=20260919-030301
+2026-09-19T03:03:01	apply	CLAUDE.md ## Duplicate	9	bucket=Duplicate reason=Duplicate backup=20260919-030301
+2026-09-19T03:03:01	revert	/private/tmp/claude-501/cd-patch-e50503kf/CLAUDE.md	3ba5f497955c	from 20260919-030301
+2026-09-19T03:11:49	blocked	headless runner auth	0/58	claude auth status loggedIn=false; refresh token expired 2026-09-15; 58 of 58 keychain credential entries expired; no ANTHROPIC_API_KEY and no apiKeyHelper. Recorded failure: "Failed to authenticate: OAuth session expired and could not be refreshed". Only Ben can re-authenticate.
+2026-09-19T03:11:49	deviation	substitute A/B runner	rejected	A subagent-based runner was considered and rejected: subagents inherit this session 74k prefix and their model identity cannot be pinned to claude-opus-5 or claude-fable-5-1, so its numbers would not be the A/B the spec defines. Swapping the runner to make the gate pass is the same error as moving a threshold.
+2026-09-19T03:11:49	unverified	hooks fire in a fresh session	no evidence	All five hooks are registered and the plugin is enabled at user scope, but no ledger.tsv exists and no hook_success record names them. Hooks load at session start and the install happened mid-session. Increment 5 gate and Part 1 done-item 3 need one fresh session.
