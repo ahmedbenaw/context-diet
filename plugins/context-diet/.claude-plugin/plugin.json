@@ -1,6 +1,6 @@
 {
   "name": "context-diet",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Measures what your context layer costs, proposes cuts with a number on each, applies them reversibly, watches occupancy, and hands off state before compaction.",
   "keywords": [
     "context",

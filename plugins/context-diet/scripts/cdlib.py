@@ -34,6 +34,9 @@ DEFAULTS = {
     # Prefix tokens above which a turn whose cache_creation exceeds its
     # cache_read counts as a cache miss. Below it a turn is too small to say.
     "cold_turn_min_tokens": 20000,
+    # H2 is SUPPORTED when at least this share of sessions grew more than their
+    # prefix, REFUTED at or below one minus it, and too close to call between.
+    "h2_growth_share": 0.6,
     "static_prefix_tokens": 60000,
     "hook_latency_ms_per_tool_call": 2000,
     "hook_injected_bytes_per_session": 4000,
@@ -461,27 +464,23 @@ def model_window(model: str, cfg: dict) -> tuple:
 def window_for(model: str, cfg: dict) -> tuple:
     """(window, source). A zero window means 'unknown model' and pauses the monitor.
 
-    Two numbers can bound a session and they are not the same measurement.
-    autoCompactWindow is one global setting that says where Claude Code's own
-    compactor fires; the per-model table says how much window the model actually
-    has. Taking the setting first, as a single global number, measures every
-    model against one denominator: with autoCompactWindow at 500,000, a
-    200,000-token model reaches Amber at 250,000 real tokens, which is past the
-    point that session can still exist. The monitor would never speak on it.
-
-    So when both are known, the smaller one wins. That keeps Amber strictly
-    below the built-in compactor, which is the rule, and never above the
-    model's real ceiling, which is physics. It is never a silent constant.
+    Spec order, Part 10 section 6: settings.autoCompactWindow first,
+    unconditionally, then the per-model table, then the unknown-model policy.
+    Ben chose this on 2026-10-04 over the smaller-of-the-two rule this function
+    shipped with (decisions.tsv row 120). The known cost, recorded rather than
+    hidden: autoCompactWindow is one global number, so with it at 500,000 a
+    200,000-token model reaches Amber at 250,000 real tokens, past the point
+    that session can exist, and the monitor stays silent on it. The source
+    string names the per-model window when it is smaller, so the gap is visible
+    in every reading instead of being a silent constant.
     """
     settings = claude_settings()
     acw = settings.get("autoCompactWindow")
     acw = acw if isinstance(acw, int) and acw > 0 else 0
     mw, msource = model_window(model, cfg)
-    if acw and mw:
-        if mw <= acw:
-            return (mw, "%s, below settings.autoCompactWindow %s" % (msource, format(acw, ",")))
-        return (acw, "settings.autoCompactWindow (below %s)" % msource)
     if acw:
+        if mw and mw < acw:
+            return (acw, "settings.autoCompactWindow (spec order; %s is smaller)" % msource)
         return (acw, "settings.autoCompactWindow")
     if mw:
         return (mw, msource)

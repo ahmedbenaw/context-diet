@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -86,6 +87,71 @@ def redact_command(cmd: str) -> str:
     return text
 
 
+READ_COMMANDS = {"cat", "head", "tail", "less", "more", "sed", "grep", "rg", "awk", "wc", "nl"}
+# For these the first non-option argument is a pattern or script, not a file.
+PATTERN_FIRST = {"sed", "grep", "rg", "awk"}
+
+
+def bash_read_paths(command: str, cwd: str) -> list:
+    """Files a shell command reads, for the common read commands only.
+
+    files.read listed only the Read tool, so a session that reads with cat,
+    sed or grep reported almost nothing: 1 read against 62 touched on the
+    session that found it. Only arguments that exist as files on disk are kept,
+    so a pattern or a flag value can never become a fabricated path.
+    """
+    paths = []
+    for segment in re.split(r"&&|\|\||;|\||\n", command or ""):
+        try:
+            words = shlex.split(segment, comments=True)
+        except ValueError:
+            continue
+        while words and ("=" in words[0] and not words[0].startswith(("/", "."))):
+            words = words[1:]
+        if not words or os.path.basename(words[0]) not in READ_COMMANDS:
+            continue
+        args = [w for w in words[1:] if not w.startswith("-")]
+        if os.path.basename(words[0]) in PATTERN_FIRST and args:
+            args = args[1:]
+        for arg in args:
+            if any(ch in arg for ch in "<>$`*?"):
+                continue
+            full = arg if os.path.isabs(arg) else os.path.join(cwd or "", arg)
+            full = os.path.normpath(os.path.expanduser(full))
+            if os.path.isfile(full):
+                paths.append(full)
+    return paths
+
+
+def clip_words(text: str, limit: int) -> str:
+    words = " ".join((text or "").split()).split(" ")
+    return " ".join(words[:limit]) if words != [""] else ""
+
+
+def prompt_text(rec: dict) -> str:
+    """The text of a prompt the person typed, or "" for anything else."""
+    if rec.get("isMeta"):
+        return ""
+    content = (rec.get("message") or {}).get("content")
+    if isinstance(content, list):
+        if any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content):
+            return ""
+        content = " ".join(c.get("text", "") for c in content
+                           if isinstance(c, dict) and c.get("type") == "text")
+    text = (content or "").strip() if isinstance(content, str) else ""
+    # Harness-injected records open with one of these tags. A prompt the person
+    # pasted can open with a tag too, so only the harness's own are skipped.
+    return "" if not text or text.startswith(HARNESS_PREFIXES) else strip_tags(text)
+
+
+HARNESS_PREFIXES = ("<command-", "<local-command", "<system-reminder", "<task-notification",
+                    "<bash-", "Caveat:", "[Request interrupted")
+
+
+def strip_tags(text: str) -> str:
+    return " ".join(re.sub(r"<[^>]{1,80}>|```", " ", text).split())
+
+
 def scan_transcript(transcript: str) -> dict:
     """Pull the checkable facts out of the transcript on disk.
 
@@ -95,13 +161,16 @@ def scan_transcript(transcript: str) -> dict:
     read: list = []
     commands: list = []
     seen_cmd = set()
+    in_progress = ""
+    last_prompt = ""
+    empty = {"touched": touched, "read": read, "commands": commands, "next_action": ""}
     p = Path(transcript or "")
     if not p.is_file():
-        return {"touched": touched, "read": read, "commands": commands}
+        return empty
     try:
         fh = p.open("r", encoding="utf-8", errors="replace")
     except OSError:
-        return {"touched": touched, "read": read, "commands": commands}
+        return empty
     with fh:
         for line in fh:
             line = line.strip()
@@ -110,6 +179,20 @@ def scan_transcript(transcript: str) -> dict:
             try:
                 rec = json.loads(line)
             except ValueError:
+                continue
+            if rec.get("type") == "user":
+                text = prompt_text(rec)
+                if text:
+                    last_prompt = text
+                continue
+            if rec.get("type") == "attachment":
+                # A message sent while the agent is working is stored as a
+                # queued_command attachment, not as a user record.
+                att = rec.get("attachment") or {}
+                if att.get("type") == "queued_command" and isinstance(att.get("prompt"), str):
+                    text = strip_tags(att["prompt"])
+                    if text:
+                        last_prompt = text
                 continue
             if rec.get("type") != "assistant":
                 continue
@@ -124,12 +207,28 @@ def scan_transcript(transcript: str) -> dict:
                 elif name in ("Read", "NotebookRead") and path:
                     if path not in read:
                         read.append(path)
+                elif name == "TodoWrite":
+                    for todo in inp.get("todos") or []:
+                        if isinstance(todo, dict) and todo.get("status") == "in_progress":
+                            in_progress = todo.get("content") or todo.get("activeForm") or ""
                 elif name == "Bash":
                     cmd = (inp.get("command") or "").strip()
+                    for path in bash_read_paths(cmd, rec.get("cwd") or ""):
+                        if path not in read:
+                            read.append(path)
                     if cmd and cmd not in seen_cmd:
                         seen_cmd.add(cmd)
                         commands.append(redact_command(cmd))
-    return {"touched": sorted(touched), "read": read, "commands": commands}
+    # next_action is lifted, never written: the task marked in progress, or
+    # failing that the last thing the person asked for, clipped to the cap.
+    if in_progress:
+        next_action = clip_words("In progress: " + in_progress, MAX_NEXT_ACTION_WORDS)
+    elif last_prompt:
+        next_action = clip_words("Last request: " + last_prompt, MAX_NEXT_ACTION_WORDS)
+    else:
+        next_action = ""
+    return {"touched": sorted(touched), "read": read, "commands": commands,
+            "next_action": next_action}
 
 
 def build_manifest(payload: dict, cwd: str, session_id: str, band: str) -> dict:
@@ -154,7 +253,7 @@ def build_manifest(payload: dict, cwd: str, session_id: str, band: str) -> dict:
         "tasks": [],
         "decisions": [],
         "commands": [{"command": c, "exit_code": None} for c in scanned["commands"][-40:]],
-        "next_action": "",
+        "next_action": scanned["next_action"],
         "unresolved": [],
     }
     return manifest

@@ -33,10 +33,12 @@
       "source": "reported by the runner itself: claude -p --output-format json returns modelUsage[<model>].contextWindow, read 2026-09-19"
     }
   },
-  "_context_windows_note": "These are the models' own ceilings, not the compaction trigger. The monitor takes the smaller of this and settings.autoCompactWindow, so with autoCompactWindow at 500,000 every model above resolves to 500,000 today and Haiku resolves to 200,000, which is the case this table exists for: one global setting measured a 200,000-token model against 500,000, so Amber landed past the end of that session and the monitor never spoke on it. A model that is absent still pauses monitoring and says so. One historical auto-compaction reads 1,316,455 and is deliberately not used as evidence of a larger window, because a multi-iteration record inflates that number by up to 2.00x.",
+  "_context_windows_note": "These are the models' own ceilings, not the compaction trigger. settings.autoCompactWindow is taken first when it is set (spec order, Ben's decision of 2026-10-04), so with it at 500,000 every model here, Haiku included, is measured against 500,000. This table is used when the setting is absent, and a reading names the table window whenever it is smaller, which is the Haiku case: Amber at 250,000 is past the end of a 200,000-token session. A model that is absent from both still pauses monitoring and says so. One historical auto-compaction reads 1,316,455 and is deliberately not used as evidence of a larger window, because a multi-iteration record inflates that number by up to 2.00x.",
   "mlflow_tracking_uri": "sqlite:///./.claude/context-diet/mlflow.db",
   "cold_turn_min_tokens": 20000,
   "_cold_turn_note": "A turn whose cache_creation exceeds its cache_read, above this many prefix tokens, re-processed the conversation at the write price instead of reading it back. Below the floor a turn is too small to say either way. Checked against 413 transcripts on this machine: 4.5% of ordinary turns above 20,000 tokens cross this test, against 86% of the turns immediately following a compaction.",
+  "h2_growth_share": 0.6,
+  "_h2_growth_share_note": "H2 is SUPPORTED when at least this share of sessions grew more than their turn-1 prefix, REFUTED at or below one minus it, and INCONCLUSIVE between. 0.6 was the literal in context_census.py before it became a key.",
   "static_prefix_tokens": 60000,
   "hook_latency_ms_per_tool_call": 2000,
   "hook_injected_bytes_per_session": 4000,

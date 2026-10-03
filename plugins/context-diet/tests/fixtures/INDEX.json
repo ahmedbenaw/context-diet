@@ -8,6 +8,7 @@
   "h2_prefix_driven": "transcripts/h2-prefix-driven.jsonl",
   "h2_split_growth": "transcripts/h2-split-growth.jsonl",
   "h2_split_prefix": "transcripts/h2-split-prefix.jsonl",
+  "hooks_by_command": "transcripts/hooks-by-command.jsonl",
   "hooks_over": "transcripts/hooks-over.jsonl",
   "hooks_under": "transcripts/hooks-under.jsonl",
   "impossible": "transcripts/impossible-occupancy.jsonl",

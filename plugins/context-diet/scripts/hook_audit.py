@@ -84,54 +84,134 @@ def short(command: str, width: int = 88) -> str:
     return text if len(text) <= width else text[: width - 3] + "..."
 
 
-def collect_plugin_hooks() -> list:
-    """Hooks from installed plugins.
+def installed_plugin_paths() -> dict:
+    """name@marketplace -> install directory, from installed_plugins.json."""
+    path = HOME / "plugins" / "installed_plugins.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for key, entries in (data.get("plugins") or {}).items():
+        for entry in entries if isinstance(entries, list) else [entries]:
+            if isinstance(entry, dict) and entry.get("installPath"):
+                out.setdefault(key, Path(entry["installPath"]).expanduser())
+    return out
 
-    Only the marketplace tree is scanned. The cache tree holds several extracted
-    versions of the same plugin, and counting those as duplicate registrations
-    would report a packaging detail as a live cost.
+
+def local_marketplace_dirs() -> dict:
+    """name@marketplace -> plugin directory, for marketplaces added from a path.
+
+    Read through each marketplace's manifest, never by walking the directory: a
+    local marketplace often sits inside a working repo, and walking it would
+    report a hooks.json belonging to some library in a virtualenv as if it were
+    a registered hook.
     """
-    rows = []
-    roots = [HOME / "plugins" / "marketplaces"]
-    seen = set()
-
-    # A marketplace added from a local path is never copied into the cache, so a
-    # scan of the cache alone misses every plugin installed that way. Its
-    # plugins are read through its manifest, never by walking the directory: a
-    # local marketplace often sits inside a working repo, and walking it would
-    # report a hooks.json belonging to some library in a virtualenv as if it
-    # were a registered hook.
-    local_plugin_dirs = []
-    for entry in (claude_settings().get("extraKnownMarketplaces") or {}).values():
+    out = {}
+    for market, entry in (claude_settings().get("extraKnownMarketplaces") or {}).items():
         source = entry.get("source") if isinstance(entry, dict) else None
         path = source.get("path") if isinstance(source, dict) else source
         if not isinstance(path, str) or not path:
             continue
         base = Path(path).expanduser()
         manifest = base / ".claude-plugin" / "marketplace.json"
-        if not manifest.is_file():
-            continue
         try:
             data = json.loads(manifest.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         for plugin in data.get("plugins") or []:
-            src = plugin.get("source") if isinstance(plugin, dict) else None
-            if isinstance(src, str):
-                candidate = (base / src).resolve()
-                if candidate.is_dir():
-                    local_plugin_dirs.append(candidate)
+            if not isinstance(plugin, dict) or not isinstance(plugin.get("source"), str):
+                continue
+            candidate = (base / plugin["source"]).resolve()
+            if candidate.is_dir() and plugin.get("name"):
+                out["%s@%s" % (plugin["name"], market)] = candidate
+    return out
 
-    for plugin_dir in local_plugin_dirs:
+
+SKIPPED: dict = {}
+
+
+def collect_plugin_hooks() -> list:
+    """Hooks from plugins that are installed and enabled, and nothing else.
+
+    This used to walk every hooks.json under the marketplace tree. A marketplace
+    is a catalogue: on this machine it held 10 hooks.json files for 4 installed
+    plugins, so hooks that never run were counted in the chain and could be
+    reported as duplicates. enabled_plugin_names() existed for this and had no
+    caller. Each plugin is now read from its own install path, falling back to a
+    local marketplace's source directory when the install path is gone.
+
+    Plugins the desktop app syncs from the account are unpacked per session and
+    are not visible from here; the report says so rather than implying it saw
+    every hook.
+    """
+    rows = []
+    seen = set()
+    enabled = set(enabled_plugin_names())
+    installed = installed_plugin_paths()
+    local = local_marketplace_dirs()
+    SKIPPED.clear()
+    SKIPPED["installed_not_enabled"] = sorted(k for k in installed if k not in enabled)
+    SKIPPED["enabled_not_found"] = []
+    for key in sorted(enabled):
+        plugin_dir = installed.get(key)
+        if plugin_dir is None or not plugin_dir.is_dir():
+            plugin_dir = local.get(key)
+        if plugin_dir is None or not plugin_dir.is_dir():
+            SKIPPED["enabled_not_found"].append(key)
+            continue
         hooks_json = plugin_dir / "hooks" / "hooks.json"
         if hooks_json.is_file():
-            rows.extend(_read_hooks_file(hooks_json, seen))
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for hooks_json in root.rglob("hooks/hooks.json"):
-            rows.extend(_read_hooks_file(hooks_json, seen))
+            for row in _read_hooks_file(hooks_json, seen):
+                row["plugin"] = key
+                rows.append(row)
+    catalogue = HOME / "plugins" / "marketplaces"
+    read = {r["source"] for r in rows}
+    SKIPPED["catalogue_hook_files_not_loaded"] = (
+        sum(1 for h in catalogue.rglob("hooks/hooks.json") if str(h) not in read)
+        if catalogue.is_dir() else 0)
     return rows
+
+
+def collect_skill_hooks() -> list:
+    """Hooks shipped inside a skill folder under ~/.claude/skills.
+
+    The desktop app loads a skill that carries hooks/hooks.json as a plugin of
+    its own. Registering the same scripts again in settings.json then runs them
+    twice: on this machine the anti-ai-design-style Stop check ran twice per
+    Stop, about 6.8 s each, and nothing reported it because the two command
+    strings differ only in the interpreter path.
+    """
+    rows = []
+    seen: set = set()
+    skills = HOME / "skills"
+    if not skills.is_dir():
+        return rows
+    for hooks_json in sorted(skills.glob("*/hooks/hooks.json")):
+        for row in _read_hooks_file(hooks_json, seen):
+            row["plugin"] = "%s (skill folder, loaded as a plugin by the desktop app)" % (
+                hooks_json.parent.parent.name)
+            rows.append(row)
+    return rows
+
+
+SCRIPT_SUFFIXES = (".py", ".sh", ".js", ".mjs", ".cjs", ".ts", ".rb")
+
+
+def duplicate_key(row: dict) -> tuple:
+    """Two registrations are the same hook if they run the same script.
+
+    Comparing whole command strings missed `python3 x.py` against
+    `/opt/homebrew/bin/python3 x.py`. The script path, after the plugin root
+    and $HOME are resolved, is what decides whether one run is redundant.
+    """
+    words = [w.strip("'\"") for w in (row.get("normalized") or "").split()]
+    idx = [i for i, w in enumerate(words) if w.endswith(SCRIPT_SUFFIXES)]
+    # The arguments after the script stay in the key: one script called as
+    # `worker-service.cjs start` and as `worker-service.cjs hook ... context`
+    # is two hooks, not one registered twice.
+    target = " ".join(words[idx[-1]:]) if idx else row.get("normalized")
+    return (row["event"], row["matcher"] or "", target)
 
 
 def _read_hooks_file(hooks_json: Path, seen: set) -> list:
@@ -231,7 +311,7 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config(".")
-    rows = collect_settings_hooks() + collect_plugin_hooks()
+    rows = collect_settings_hooks() + collect_plugin_hooks() + collect_skill_hooks()
     measured = census_h3(Path(args.census))
 
     by_event: dict = defaultdict(list)
@@ -241,7 +321,7 @@ def main() -> int:
     duplicates = []
     counts: dict = defaultdict(list)
     for r in rows:
-        counts[(r["event"], r["matcher"], r["normalized"])].append(r)
+        counts[duplicate_key(r)].append(r)
     limit = int(cfg.get("duplicate_hook_registrations") or 1)
     for key, group in counts.items():
         if len(group) > limit:
@@ -272,6 +352,9 @@ def main() -> int:
         },
         "duplicate_registrations": duplicates,
         "inert_hookify_rules": inert,
+        "plugins_not_audited": dict(SKIPPED),
+        "scope_note": "plugins synced from the account by the desktop app are unpacked per "
+                      "session and are not visible to this audit",
     }
 
     if args.json:

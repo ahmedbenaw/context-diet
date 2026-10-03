@@ -52,6 +52,8 @@ COLUMNS = [
     "h3_hook_ms_total",
     "h3_hook_ms_top_event",
     "h3_hook_ms_top_value",
+    "h3_hook_ms_top_hook",
+    "h3_hook_ms_top_hook_value",
     "h4_injected_bytes",
     "h4_top_injector",
     "h4_top_injector_bytes",
@@ -129,20 +131,41 @@ def new_model_bucket() -> dict:
         "top_result_name": "",
         "h5_cold_starts": 0,
         "h5_cold_start_tokens": 0,
+        "hook_ms_by_event": defaultdict(int),
+        "hook_ms_by_hook": defaultdict(int),
+        "injected_by_event": defaultdict(int),
     }
+
+
+def hook_label(att: dict) -> str:
+    """Name a hook by what it ran, not by the event that fired it.
+
+    hookName is the event and matcher ("PreToolUse:Bash"), so keying cost on it
+    pooled every hook registered on that event into one figure. hook_success and
+    hook_non_blocking_error records carry the command; that is the hook.
+    """
+    cmd = " ".join(str(att.get("command") or "").split())
+    if cmd:
+        return cmd if len(cmd) <= 160 else cmd[:157] + "..."
+    return "(no command) " + (att.get("hookName") or "unnamed")
+
+
+def merge_hook_counts(into: dict, src: dict) -> None:
+    for key in ("hook_ms_by_event", "hook_ms_by_hook", "injected_by_event"):
+        for k, v in src[key].items():
+            into[key][k] += v
 
 
 def analyze(path: Path, cold_floor: int = 20000) -> dict:
     """One transcript -> per-model rows plus session-level hook measurements.
 
-    H3 and H4 are session-level: a hook's wall-clock and injected bytes are not
-    attributable to a model, so they are reported on the session and repeated on
-    each of its model rows, with the session id making the duplication visible.
+    H3 and H4 are charged to the model whose turn the hook fired in, so the
+    model rows of one transcript sum to the session's total instead of each
+    repeating it. Hooks that fire before the first assistant turn (SessionStart,
+    the first prompt) belong to the model that then answers.
     """
     models: dict = defaultdict(new_model_bucket)
-    hook_ms_by_event: dict = defaultdict(int)
-    hook_ms_by_name: dict = defaultdict(int)
-    injected_by_hook: dict = defaultdict(int)
+    before_first_turn = new_model_bucket()
     session_id = ""
     compactions = 0
     auto_compactions = 0
@@ -162,6 +185,8 @@ def analyze(path: Path, cold_floor: int = 20000) -> dict:
             model = msg.get("model") or "unknown"
             if model == "<synthetic>":
                 continue
+            if not current_model:
+                merge_hook_counts(models[model], before_first_turn)
             current_model = model
             bucket = models[model]
             bucket["turns"] += 1
@@ -249,12 +274,16 @@ def analyze(path: Path, cold_floor: int = 20000) -> dict:
         if rtype == "attachment":
             att = rec.get("attachment") or {}
             atype = att.get("type")
+            owner_bucket = models[current_model] if current_model else before_first_turn
             if atype in ("hook_success", "hook_non_blocking_error"):
                 name = att.get("hookName") or "(unnamed hook)"
                 event = att.get("hookEvent") or name.split(":")[0]
-                ms = int(att.get("durationMs") or 0)
-                hook_ms_by_event[event] += ms
-                hook_ms_by_name[name] += ms
+                try:
+                    ms = int(att.get("durationMs") or 0)
+                except (TypeError, ValueError):
+                    ms = 0
+                owner_bucket["hook_ms_by_event"][event] += ms
+                owner_bucket["hook_ms_by_hook"][hook_label(att)] += ms
             elif atype == "hook_additional_context":
                 content = att.get("content")
                 if isinstance(content, list):
@@ -266,10 +295,14 @@ def analyze(path: Path, cold_floor: int = 20000) -> dict:
                 # hook happened to run most recently invented an attribution the
                 # record already stated, and mis-stated it whenever a hook
                 # injected without having logged a hook_success first.
-                injected_by_hook[att.get("hookName") or "(unattributed)"] += size
+                # The record names the event, never the command, so H4 is
+                # keyed by event: attributing it to whichever hook ran last on
+                # that event would state something the transcript does not.
+                owner_bucket["injected_by_event"][att.get("hookName") or "(unattributed)"] += size
 
-    top_event = max(hook_ms_by_event.items(), key=lambda kv: kv[1], default=("", 0))
-    top_injector = max(injected_by_hook.items(), key=lambda kv: kv[1], default=("", 0))
+    if not models and any(before_first_turn[k] for k in
+                          ("hook_ms_by_event", "hook_ms_by_hook", "injected_by_event")):
+        merge_hook_counts(models["(no assistant turns)"], before_first_turn)
     return {
         "session_id": session_id,
         "compactor_events": compactions,
@@ -277,14 +310,11 @@ def analyze(path: Path, cold_floor: int = 20000) -> dict:
         "compactor_lowest_auto_pre_tokens": lowest_auto_pre,
         "compactor_dropped_tokens": dropped,
         "models": models,
-        "h3_total": sum(hook_ms_by_event.values()),
-        "h3_top_event": top_event[0],
-        "h3_top_value": top_event[1],
-        "h3_by_name": dict(hook_ms_by_name),
-        "h4_total": sum(injected_by_hook.values()),
-        "h4_top": top_injector[0],
-        "h4_top_bytes": top_injector[1],
     }
+
+
+def top(counts: dict) -> tuple:
+    return max(counts.items(), key=lambda kv: (kv[1], kv[0]), default=("", 0))
 
 
 def rows_for(path: Path, result: dict) -> list:
@@ -293,6 +323,8 @@ def rows_for(path: Path, result: dict) -> list:
     if not models:
         models = {"(no assistant turns)": new_model_bucket()}
     for model, b in sorted(models.items()):
+        top_event, top_hook, top_inj = (top(b["hook_ms_by_event"]), top(b["hook_ms_by_hook"]),
+                                        top(b["injected_by_event"]))
         rows.append(
             {
                 "transcript": str(path),
@@ -309,12 +341,14 @@ def rows_for(path: Path, result: dict) -> list:
                 "h2_cache_read_growth": b["h2_cache_read_last"] - b["h2_cache_read_first"],
                 "h2_top_tool_result_bytes": b["top_result_bytes"],
                 "h2_top_tool_result_name": b["top_result_name"],
-                "h3_hook_ms_total": result["h3_total"],
-                "h3_hook_ms_top_event": result["h3_top_event"],
-                "h3_hook_ms_top_value": result["h3_top_value"],
-                "h4_injected_bytes": result["h4_total"],
-                "h4_top_injector": result["h4_top"],
-                "h4_top_injector_bytes": result["h4_top_bytes"],
+                "h3_hook_ms_total": sum(b["hook_ms_by_event"].values()),
+                "h3_hook_ms_top_event": top_event[0],
+                "h3_hook_ms_top_value": top_event[1],
+                "h3_hook_ms_top_hook": top_hook[0],
+                "h3_hook_ms_top_hook_value": top_hook[1],
+                "h4_injected_bytes": sum(b["injected_by_event"].values()),
+                "h4_top_injector": top_inj[0],
+                "h4_top_injector_bytes": top_inj[1],
                 "h5_cache_hit_ratio": (
                     round(ratio, 4) if (ratio := hit_ratio(b["cache_creation"], b["cache_read"]))
                     is not None else ""),
@@ -344,7 +378,7 @@ def model_sort_key(model: str) -> tuple:
     return (1, 0, low)
 
 
-def summarize(rows: list) -> str:
+def summarize(rows: list, growth_share: float = 0.6) -> str:
     by_model: dict = defaultdict(list)
     for r in rows:
         by_model[r["model"]].append(r)
@@ -372,14 +406,21 @@ def summarize(rows: list) -> str:
         share = (md / reads) if reads else 0.0
         median_prefix = median([r["h2_prefix_tokens"] for r in rs if r["h2_prefix_tokens"]])
         median_growth = median([r["h2_cache_read_growth"] for r in rs])
-        sessions = {r["session_id"] or r["transcript"]: r for r in rs}
-        median_hook_ms = median([r["h3_hook_ms_total"] for r in sessions.values()])
-        median_injected = median([r["h4_injected_bytes"] for r in sessions.values()])
+        # One row per transcript per model, and hook cost is charged to the
+        # model whose turn it fell in, so each row here is this model's share
+        # of one transcript and nothing is counted twice.
+        sessions = {r["transcript"] for r in rs}
+        median_hook_ms = median([r["h3_hook_ms_total"] for r in rs])
+        median_injected = median([r["h4_injected_bytes"] for r in rs])
         top_injectors: dict = defaultdict(int)
-        for r in sessions.values():
+        top_hooks: dict = defaultdict(int)
+        for r in rs:
             if r["h4_top_injector"]:
                 top_injectors[r["h4_top_injector"]] += r["h4_top_injector_bytes"]
+            if r.get("h3_hook_ms_top_hook"):
+                top_hooks[r["h3_hook_ms_top_hook"]] += r["h3_hook_ms_top_hook_value"]
         top_injector = max(top_injectors.items(), key=lambda kv: kv[1], default=("none", 0))
+        top_hook = max(top_hooks.items(), key=lambda kv: kv[1], default=("none", 0))
         top_results: dict = defaultdict(int)
         for r in rs:
             if r["h2_top_tool_result_name"]:
@@ -411,12 +452,12 @@ def summarize(rows: list) -> str:
         else:
             share_growth = growth_sessions / n_paired
             h2_growth_wins = share_growth >= 0.5
-            if share_growth >= 0.6:
+            if share_growth >= growth_share:
                 h2 = "SUPPORTED"
                 h2_because = (
                     "accumulated output drives cost in %d of %d sessions"
                     % (growth_sessions, n_paired))
-            elif share_growth <= 0.4:
+            elif share_growth <= 1.0 - growth_share:
                 h2 = "REFUTED"
                 h2_because = (
                     "the static prefix drives cost in %d of %d sessions"
@@ -451,8 +492,9 @@ def summarize(rows: list) -> str:
             )
         )
         out.append(
-            "- **H3 %s** - median hook wall-clock per session %s ms."
-            % (h3, format(int(median_hook_ms), ","))
+            "- **H3 %s** - median hook wall-clock per session %s ms. The costliest hook "
+            "across these sessions is `%s` at %s ms in total."
+            % (h3, format(int(median_hook_ms), ","), top_hook[0], format(int(top_hook[1]), ","))
         )
         # H5: the cache. Read is billed at a fraction of write, so the share of
         # prefix tokens served from cache is the figure with money attached. The
@@ -523,7 +565,12 @@ def main() -> int:
 
     # H5's floor is a config key like every other threshold, so a wrong default
     # is visible in the effective table rather than buried in this file.
-    cold_floor = int(load_config(args.project).get("cold_turn_min_tokens") or 20000)
+    cfg = load_config(args.project)
+    cold_floor = int(cfg.get("cold_turn_min_tokens") or 20000)
+    h2_share = float(cfg.get("h2_growth_share") or 0.6)
+    if not 0.5 <= h2_share <= 1.0:
+        sys.stderr.write("h2_growth_share must be between 0.5 and 1.0; got %s, using 0.6\n" % h2_share)
+        h2_share = 0.6
 
     root = Path(args.projects)
     if not root.exists():
@@ -546,7 +593,7 @@ def main() -> int:
             fh.write(
                 "\t".join(str(r[c]).replace("\t", " ").replace("\n", " ") for c in COLUMNS) + "\n"
             )
-    (outdir / "census-summary.md").write_text(summarize(rows), encoding="utf-8")
+    (outdir / "census-summary.md").write_text(summarize(rows, h2_share), encoding="utf-8")
     sys.stdout.write(
         "context-diet census: %d transcripts, %d rows -> %s\n" % (len(files), len(rows), tsv)
     )

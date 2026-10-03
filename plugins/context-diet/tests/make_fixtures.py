@@ -106,7 +106,8 @@ def assistant(model: str, cc: int = 0, cr: int = 0, inp: int = 2, out: int = 50,
     }
 
 
-def hook_success(name: str, event: str, ms: int, stdout: str = "") -> dict:
+def hook_success(name: str, event: str, ms: int, stdout: str = "",
+                 command: str = "echo") -> dict:
     return {
         "type": "attachment",
         "sessionId": "fixture",
@@ -118,7 +119,7 @@ def hook_success(name: str, event: str, ms: int, stdout: str = "") -> dict:
             "stdout": stdout,
             "stderr": "",
             "exitCode": 0,
-            "command": "echo",
+            "command": command,
         },
     }
 
@@ -309,6 +310,26 @@ def build(out: Path, heavy: bool = False) -> dict:
             assistant("claude-opus-5", cc=0, cr=60_000, out=100),
             assistant("claude-fable-5-1", cc=70_000, cr=0, out=100),
             assistant("claude-fable-5-1", cc=0, cr=90_000, out=100),
+        ],
+    )
+
+    # Hook cost across two models, with two hooks on the same event. Defects
+    # 105 and 106: cost was keyed by event, so the two PreToolUse:Bash hooks
+    # pooled into one figure, and the session total was copied onto every model
+    # row. Expected by hand: opus 100 + 300 + 50 = 450 ms, top hook guard.py
+    # at 300; fable 700 ms; the two rows sum to the session's 1,150.
+    made["hooks_by_command"] = write_jsonl(
+        t / "hooks-by-command.jsonl",
+        [
+            hook_success("SessionStart:startup", "SessionStart", 100,
+                         command="python3 hooks/session.py"),
+            assistant("claude-opus-5", cc=30_000, cr=0, out=50),
+            hook_success("PreToolUse:Bash", "PreToolUse", 300, command="python3 hooks/guard.py"),
+            hook_success("PreToolUse:Bash", "PreToolUse", 50, command="bash hooks/lint.sh"),
+            assistant("claude-opus-5", cc=0, cr=30_000, out=50),
+            assistant("claude-fable-5", cc=30_000, cr=0, out=50),
+            hook_success("PreToolUse:Bash", "PreToolUse", 700, command="python3 hooks/guard.py"),
+            assistant("claude-fable-5", cc=0, cr=30_000, out=50),
         ],
     )
 

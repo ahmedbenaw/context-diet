@@ -168,19 +168,26 @@ def cold_turn(usage: dict, cfg: dict, payload: dict, cwd: str, session_id: str,
 
 def impossible(model: str, ratio: float, window: int, session_id: str, cwd: str,
                event: str, state_dir) -> int:
-    """An occupancy above 100% is a bug in this monitor, so it says so and stops.
+    """An occupancy above 100% means the window is wrong for this session; say so and stop.
 
-    The alternative is escalating to Red on a number the monitor cannot justify,
-    which turns a wrong window entry into a wrong irreversible action. Reported
-    once, then silence for the session.
+    It was first read as a bug in the monitor. Measured on 2026-10-04 it has two
+    causes. A multi-pass turn's top-level usage sums its passes, about 2x, which
+    context_tokens() already corrects by reading the last pass. And a session
+    keeps the compaction trigger it started with: one that began on 13 Sep under
+    the old ~1M trigger compacted at 660,956 on 14 Sep, hours after another had
+    compacted at 467,778 under the lowered setting. Read against the current
+    setting, such a session is genuinely past 100%. Escalating to Red on a
+    window that is not this session's would turn it into a wrong irreversible
+    action, so it is reported once, then silence for the session.
     """
     if not claim_once(cwd, session_id, "impossible", state_dir, "%.4f" % ratio):
         return 0
     emit(event, (
-        'context-diet: this session reads as %.0f%% of a %s-token window for "%s", which is '
-        "impossible. That is a bug in this monitor or a wrong entry in "
-        ".claude/context-diet.json, so occupancy monitoring is paused for this session rather "
-        "than acted on. Cache-miss detection still runs."
+        'context-diet: this session reads as %.0f%% of a %s-token window for "%s", so that '
+        "window is not this session's. Usually the session started before autoCompactWindow "
+        "was lowered and still compacts at its old size; otherwise .claude/context-diet.json "
+        "has a wrong entry. Occupancy monitoring is paused for this session. Cache-miss "
+        "detection still runs."
         % (ratio * 100.0, format(window, ","), model or "unknown")
     ))
     return 0

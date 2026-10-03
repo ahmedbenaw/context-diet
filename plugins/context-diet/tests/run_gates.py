@@ -212,6 +212,50 @@ def g_ab_no_pooling():
     return (ok, "two-model transcript produced %d rows across %d models" % (len(two), len(models)))
 
 
+@gate("census_hooks_per_model_by_command")
+def g_census_hooks_per_model_by_command():
+    """Hook cost is charged to one model, never repeated, and named by command."""
+    out = Path(tempfile.mkdtemp(prefix="cd-hooks-"))
+    subprocess.run(
+        [PY, str(SCRIPTS / "context_census.py"), "--projects", str(FIXTURES / "transcripts"),
+         "--out", str(out)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120,
+    )
+    tsv = (out / "census.tsv").read_text(encoding="utf-8").splitlines()
+    header = tsv[0].split("\t")
+    rows = {r["model"]: r for r in (dict(zip(header, line.split("\t"))) for line in tsv[1:])
+            if r["transcript"].endswith("hooks-by-command.jsonl")}
+    if set(rows) != {"claude-opus-5", "claude-fable-5"}:
+        return (False, "expected an opus and a fable row, got %s" % sorted(rows))
+    o, f = rows["claude-opus-5"], rows["claude-fable-5"]
+    got = (int(o["h3_hook_ms_total"]), int(f["h3_hook_ms_total"]),
+           o["h3_hook_ms_top_hook"], int(o["h3_hook_ms_top_hook_value"]))
+    want = (450, 700, "python3 hooks/guard.py", 300)
+    return (got == want, "per-model ms, opus top hook: %s (by hand %s)" % (got, want))
+
+
+@gate("census_h2_cutoff_is_config")
+def g_census_h2_cutoff_is_config():
+    """The H2 cutoff comes from h2_growth_share, not a literal in the census."""
+    lines = {}
+    for share in (0.6, 0.8):
+        proj = Path(tempfile.mkdtemp(prefix="cd-h2share-"))
+        (proj / ".claude").mkdir()
+        (proj / ".claude" / "context-diet.json").write_text(
+            json.dumps({"h2_growth_share": share}), encoding="utf-8")
+        subprocess.run(
+            [PY, str(SCRIPTS / "context_census.py"), "--projects", str(FIXTURES / "transcripts"),
+             "--out", str(proj / "out"), "--project", str(proj)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120,
+        )
+        text = (proj / "out" / "census-summary.md").read_text(encoding="utf-8")
+        lines[share] = [ln for ln in text.splitlines() if "**H2 " in ln][0]
+    # 12 of 17 sessions grew more than their prefix: 0.71, above 0.6, below 0.8.
+    ok = ("H2 SUPPORTED, accumulated output drives cost in 12 of 17" in lines[0.6]
+          and "H2 INCONCLUSIVE, sessions split 12 to 5" in lines[0.8])
+    return (ok, "0.6: %s | 0.8: %s" % (lines[0.6][:60], lines[0.8][:60]))
+
+
 # --------------------------------------------------------------------------
 # Monitor
 
@@ -278,6 +322,32 @@ def g_unknown_model():
         and not wrote_manifest
     )
     return (ok, "%d line(s), manifest written: %s" % (len(lines), wrote_manifest))
+
+
+@gate("window_takes_autocompactwindow_first")
+def g_window_spec_order():
+    """settings.autoCompactWindow wins whenever it is set (spec section 6, Ben 2026-10-04)."""
+    import cdlib
+
+    settings = Path(tempfile.mkdtemp(prefix="cd-win-")) / "settings.json"
+    cfg = {"context_windows": {"small-model": {"window": 200000, "source": "fixture"},
+                               "big-model": {"window": 1000000, "source": "fixture"}}}
+    old = os.environ.get("CONTEXT_DIET_SETTINGS")
+    os.environ["CONTEXT_DIET_SETTINGS"] = str(settings)
+    try:
+        settings.write_text(json.dumps({"autoCompactWindow": 500000}), encoding="utf-8")
+        small, small_src = cdlib.window_for("small-model", cfg)
+        big, _ = cdlib.window_for("big-model", cfg)
+        settings.write_text("{}", encoding="utf-8")
+        table_only, _ = cdlib.window_for("small-model", cfg)
+    finally:
+        if old is None:
+            os.environ.pop("CONTEXT_DIET_SETTINGS", None)
+        else:
+            os.environ["CONTEXT_DIET_SETTINGS"] = old
+    got = (small, big, table_only, "is smaller" in small_src)
+    return (got == (500000, 500000, 200000, True),
+            "200k model %d, 1M model %d, no setting %d, gap named %s" % got)
 
 
 @gate("monitor_budget_ms")
@@ -627,6 +697,112 @@ def g_duplicate_hooks():
             "%d duplicate registration(s) and %d inert rule(s) reported" % (len(dups), len(inert)))
 
 
+@gate("hook_audit_finds_a_skill_hook_registered_twice")
+def g_hook_audit_skill_duplicate():
+    """A skill folder's own hooks.json plus a settings entry for the same script is a duplicate.
+
+    And one script called with different arguments is two hooks, not one twice.
+    """
+    home = Path(tempfile.mkdtemp(prefix="cd-skillhook-")).resolve()
+    skill = home / ".claude" / "skills" / "s"
+    (skill / "hooks").mkdir(parents=True)
+    (skill / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/check.py"'}]}]}}),
+        encoding="utf-8")
+    settings = home / ".claude" / "settings.json"
+    settings.write_text(json.dumps({"hooks": {
+        "Stop": [{"hooks": [{"type": "command",
+                             "command": '/opt/homebrew/bin/python3 "%s/scripts/check.py"' % skill}]}],
+        "SessionStart": [{"hooks": [
+            {"type": "command", "command": "node %s/w.cjs start" % home},
+            {"type": "command", "command": "node %s/w.cjs hook context" % home}]}]}}),
+        encoding="utf-8")
+    env = dict(os.environ, CONTEXT_DIET_SETTINGS=str(settings), CONTEXT_DIET_HOME=str(home),
+               HOME=str(home), PYTHONPATH=str(SCRIPTS))
+    r = subprocess.run([PY, str(SCRIPTS / "hook_audit.py"), "--json"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, env=env)
+    if r.returncode != 0:
+        return (False, r.stderr.decode()[:200])
+    dups = json.loads(r.stdout.decode()).get("duplicate_registrations", [])
+    got = sorted((d["event"], d["count"]) for d in dups)
+    return (got == [("Stop", 2)], "duplicates found %s; expected only the Stop check twice" % got)
+
+
+@gate("hook_audit_reads_only_enabled_plugins")
+def g_hook_audit_enabled_only():
+    """A catalogue hook and a disabled plugin's hook are not in the chain."""
+    home = Path(tempfile.mkdtemp(prefix="cd-plug-"))
+    claude = home / ".claude"
+
+    def plugin(root: Path, command: str) -> Path:
+        (root / "hooks").mkdir(parents=True)
+        (root / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {"Stop": [
+            {"matcher": "", "hooks": [{"type": "command", "command": command}]}]}}),
+            encoding="utf-8")
+        return root
+
+    on = plugin(claude / "plugins" / "cache" / "m" / "on" / "1.0", "echo enabled-hook")
+    off = plugin(claude / "plugins" / "cache" / "m" / "off" / "1.0", "echo disabled-hook")
+    plugin(claude / "plugins" / "marketplaces" / "m" / "plugins" / "catalogue-only",
+           "echo catalogue-hook")
+    (claude / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {
+        "on@m": [{"installPath": str(on)}], "off@m": [{"installPath": str(off)}]}}),
+        encoding="utf-8")
+    settings = claude / "settings.json"
+    settings.write_text(json.dumps({"enabledPlugins": {"on@m": True, "off@m": False}}),
+                        encoding="utf-8")
+    env = dict(os.environ, CONTEXT_DIET_SETTINGS=str(settings), CONTEXT_DIET_HOME=str(home),
+               HOME=str(home), PYTHONPATH=str(SCRIPTS))
+    r = subprocess.run([PY, str(SCRIPTS / "hook_audit.py"), "--json"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, env=env)
+    if r.returncode != 0:
+        return (False, r.stderr.decode()[:200])
+    data = json.loads(r.stdout.decode())
+    cmds = [h["command"] for e in data["events"].values() for h in e["hooks"]]
+    skipped = data.get("plugins_not_audited", {})
+    ok = (cmds == ["echo enabled-hook"]
+          and skipped.get("installed_not_enabled") == ["off@m"]
+          and skipped.get("catalogue_hook_files_not_loaded") == 1)
+    return (ok, "chain %s, skipped %s" % (cmds, skipped))
+
+
+@gate("manifest_lifts_next_action_and_shell_reads")
+def g_manifest_next_action_and_reads():
+    """next_action is lifted from the transcript; cat/sed/grep reads are listed."""
+    sys.path.insert(0, str(SCRIPTS))
+    import handoff  # noqa: PLC0415
+
+    work = Path(tempfile.mkdtemp(prefix="cd-na-"))
+    (work / "notes.txt").write_text("x\n", encoding="utf-8")
+    (work / "src.py").write_text("x = 1\n", encoding="utf-8")
+
+    def bash(cmd):
+        return {"type": "assistant", "cwd": str(work), "message": {"model": "m", "content": [
+            {"type": "tool_use", "id": cmd[:8], "name": "Bash", "input": {"command": cmd}}]}}
+
+    records = [
+        {"type": "user", "message": {"content": "<command-name>/compact</command-name>"}},
+        {"type": "user", "message": {"content": "fix the parser please"}},
+        bash("cat notes.txt && grep -n src.py src.py | head -3"),
+        bash("sed -n 1,5p missing.txt"),
+        {"type": "attachment", "attachment": {"type": "queued_command",
+                                              "prompt": "then run the tests"}},
+    ]
+    t = work / "t.jsonl"
+    t.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    s1 = handoff.scan_transcript(str(t))
+    todo = {"type": "assistant", "message": {"model": "m", "content": [
+        {"type": "tool_use", "id": "td", "name": "TodoWrite", "input": {"todos": [
+            {"content": "Write the parser test", "status": "in_progress"}]}}]}}
+    t.write_text(t.read_text(encoding="utf-8") + json.dumps(todo) + "\n", encoding="utf-8")
+    s2 = handoff.scan_transcript(str(t))
+    want_reads = [str(work / "notes.txt"), str(work / "src.py")]
+    got = (s1["next_action"], [str(Path(p).resolve()) for p in s1["read"]], s2["next_action"])
+    want = ("Last request: then run the tests", [str(Path(p).resolve()) for p in want_reads],
+            "In progress: Write the parser test")
+    return (got == want, "got %s" % (got,))
+
+
 # --------------------------------------------------------------------------
 # Budget and edit path
 
@@ -784,6 +960,39 @@ def g_bootstrap():
                    stderr=subprocess.DEVNULL, env=env, timeout=120)
     second = (project / ".mcp.json").read_bytes() if (project / ".mcp.json").is_file() else b""
     return (bool(first) and first == second, "two runs produce a byte-identical .mcp.json")
+
+
+@gate("bootstrap_keeps_either_uri_spelling")
+def g_bootstrap_uri_spelling():
+    """A relative and an absolute URI for one store are the same registration.
+
+    .mcp.json in this repo holds the relative form, and the bootstrap compared
+    it as a string to its absolute default, so running it rewrote the file with
+    a home directory in a public repo. bootstrap_idempotent never saw this,
+    because it starts with no .mcp.json at all.
+    """
+    script = SCRIPTS / "mlflow_bootstrap.sh"
+    env = {k: v for k, v in os.environ.items() if k != "MLFLOW_TRACKING_URI"}
+    results = []
+    for spelling in ("relative", "absolute", "fresh"):
+        project = Path(tempfile.mkdtemp(prefix="cd-uri-")).resolve()
+        mcp = project / ".mcp.json"
+        if spelling != "fresh":
+            uri = ("sqlite:///./.claude/context-diet/mlflow.db" if spelling == "relative"
+                   else "sqlite:///%s/.claude/context-diet/mlflow.db" % project)
+            mcp.write_text(json.dumps({"mcpServers": {"mlflow-mcp": {
+                "command": "uv", "args": [], "env": {"MLFLOW_TRACKING_URI": uri}}}}),
+                encoding="utf-8")
+        before = mcp.read_bytes() if mcp.is_file() else b""
+        subprocess.run(["bash", str(script), str(project)], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, env=env, timeout=120)
+        after = mcp.read_bytes() if mcp.is_file() else b""
+        if spelling == "fresh":
+            ok = bool(after) and str(project).encode() not in after
+        else:
+            ok = after == before
+        results.append((spelling, ok))
+    return (all(ok for _s, ok in results), "kept or wrote portably: %s" % results)
 
 
 @gate("no_listening_socket")
@@ -1161,8 +1370,10 @@ def g_hook_cost_per_event():
     for event, calls in events.items():
         total = 0.0
         for script, payload in calls:
-            _c, _o, _e, ms = run_hook(script, payload)
-            total += ms
+            # Fastest of three. One sample measured the machine as much as the
+            # hook: under a load average of 23 a 75 ms PostToolUse pair read
+            # 469 ms. A hook that is really slow is slow on every attempt.
+            total += min(run_hook(script, payload)[3] for _ in range(3))
         worst.append((total, event, len(calls)))
         if total >= 200:
             return (False, "%s fires %d hook(s) costing %.0f ms together, budget 200"
@@ -1440,7 +1651,7 @@ def g_cold_cache():
 
 @gate("impossible_occupancy_pauses")
 def g_impossible_occupancy():
-    """A reading above 100% is a bug in the monitor, so it says so and stops.
+    """A reading above 100% means the window is not this session's, so it says so and stops.
 
     Escalating to Red on a number the monitor cannot justify is how a wrong
     window entry turns into a wrong irreversible action. A 115% reading was seen
@@ -1453,8 +1664,8 @@ def g_impossible_occupancy():
         payload_for(FIXTURES / "transcripts" / "impossible-occupancy.jsonl", project))
     if code != 0:
         return (False, "exited %d" % code)
-    if "impossible" not in out:
-        return (False, "an impossible reading was not named as one: %r" % out[:160])
+    if "window is not this session's" not in out:
+        return (False, "a reading above 100%% was not named as a wrong window: %r" % out[:160])
     if "paused" not in out:
         return (False, "it did not say monitoring is paused")
     low = out.lower()
@@ -1463,7 +1674,8 @@ def g_impossible_occupancy():
     lines = [ln for ln in out.splitlines() if ln.strip()]
     if len(lines) != 1:
         return (False, "expected exactly one line, got %d" % len(lines))
-    return (True, "a 115% reading is reported as a bug in the monitor, once, with no action taken")
+    return (True, "a 115% reading is reported once as a window that is not this session's, "
+                  "with no action taken")
 
 
 @gate("fixtures_survive_a_rebuild")

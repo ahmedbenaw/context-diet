@@ -19,7 +19,25 @@ REPO="$(cd "${1:-$(pwd)}" && pwd)"
 # file:// URI, so the default is a local SQLite file. It must be the SAME store
 # the Python sink writes to, or the MCP server reads an empty database while
 # every script logs somewhere else.
-TRACKING_URI="${MLFLOW_TRACKING_URI:-sqlite:///${REPO}/.claude/context-diet/mlflow.db}"
+#
+# Two spellings of one store. .mcp.json is project scope and committed, and the
+# MCP server starts in the project directory, so it gets the relative form: an
+# absolute one put a home directory into a public repo. The promote command is
+# user scope and runs from anywhere, so it gets the absolute form. They are
+# compared by the file they resolve to, never as strings, or each spelling
+# reads as a mismatch and the bootstrap rewrites the other one.
+PROJECT_URI="${MLFLOW_TRACKING_URI:-sqlite:///./.claude/context-diet/mlflow.db}"
+resolve_uri() {
+  python3 -c 'import sys, pathlib
+uri, repo = sys.argv[1], pathlib.Path(sys.argv[2])
+if uri.startswith("sqlite:///"):
+    tail = uri[len("sqlite:///"):]
+    p = pathlib.Path(tail)
+    print("sqlite:///" + str((p if p.is_absolute() else repo / p).resolve()))
+else:
+    print(uri)' "$1" "$REPO"
+}
+TRACKING_URI="$(resolve_uri "$PROJECT_URI")"
 MCP_JSON="${REPO}/.mcp.json"
 STORE_DIR="${REPO}/.claude/context-diet"
 STATUS="ok"
@@ -65,10 +83,10 @@ s = (d.get("mcpServers") or {}).get("mlflow-mcp") or {}
 print((s.get("env") or {}).get("MLFLOW_TRACKING_URI") or "")' "$MCP_JSON" 2>/dev/null || true)"
 fi
 
-if [ "$CURRENT_URI" = "$TRACKING_URI" ]; then
+if [ -n "$CURRENT_URI" ] && [ "$(resolve_uri "$CURRENT_URI")" = "$TRACKING_URI" ]; then
   say "mlflow-mcp already registered with this tracking URI (project scope)"
 else
-  if python3 - "$MCP_JSON" "$TRACKING_URI" <<'PY'
+  if python3 - "$MCP_JSON" "$PROJECT_URI" <<'PY'
 import json, sys, pathlib
 target = pathlib.Path(sys.argv[1])
 uri = sys.argv[2]
