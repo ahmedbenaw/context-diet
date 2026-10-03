@@ -9,16 +9,34 @@
   "unknown_model_policy": "pause",
   "context_windows": {
     "claude-opus-5": {
-      "window": 500000,
-      "source": "autoCompactWindow in ~/.claude/settings.json on this machine, read 2026-09-19"
+      "window": 1000000,
+      "source": "reported by the runner itself: claude -p --output-format json returns modelUsage[<model>].contextWindow, read 2026-09-19"
+    },
+    "claude-opus-4-8": {
+      "window": 1000000,
+      "source": "peak single-prompt context observed in this machine's transcripts, measured 2026-09-19 with the iterations-aware numerator: 999,231 (not runner-confirmed; weaker evidence than the rows the runner reports)"
     },
     "claude-fable-5-1": {
-      "window": 500000,
-      "source": "autoCompactWindow in ~/.claude/settings.json on this machine, read 2026-09-19"
+      "window": 1000000,
+      "source": "not reported by the runner: claude -p --model claude-fable-5-1 returns an api_error, so no modelUsage. Kept at the same tier as claude-fable-5, corroborated by a peak single-prompt context of 933,273 in this machine's transcripts. Weaker evidence than the rows above."
+    },
+    "claude-fable-5": {
+      "window": 1000000,
+      "source": "reported by the runner itself: claude -p --output-format json returns modelUsage[<model>].contextWindow, read 2026-09-19 (the alias `fable` resolves to this canonical id)"
+    },
+    "claude-sonnet-5": {
+      "window": 615688,
+      "source": "lower bound only, not a documented window: peak single-prompt context observed in this machine's transcripts, measured 2026-09-19 with the iterations-aware numerator: 615,688. Listed at the observed floor rather than rounded up, because a window guessed too large is the failure that makes the monitor never fire. (not runner-confirmed)"
+    },
+    "claude-haiku-4-5-20251001": {
+      "window": 200000,
+      "source": "reported by the runner itself: claude -p --output-format json returns modelUsage[<model>].contextWindow, read 2026-09-19"
     }
   },
-  "_context_windows_note": "Only models whose window was actually read from this machine are listed. A model that is absent pauses monitoring for that session and says so, rather than guessing a denominator. A wrong denominator makes every threshold wrong.",
+  "_context_windows_note": "These are the models' own ceilings, not the compaction trigger. The monitor takes the smaller of this and settings.autoCompactWindow, so with autoCompactWindow at 500,000 every model above resolves to 500,000 today and Haiku resolves to 200,000, which is the case this table exists for: one global setting measured a 200,000-token model against 500,000, so Amber landed past the end of that session and the monitor never spoke on it. A model that is absent still pauses monitoring and says so. One historical auto-compaction reads 1,316,455 and is deliberately not used as evidence of a larger window, because a multi-iteration record inflates that number by up to 2.00x.",
   "mlflow_tracking_uri": "sqlite:///./.claude/context-diet/mlflow.db",
+  "cold_turn_min_tokens": 20000,
+  "_cold_turn_note": "A turn whose cache_creation exceeds its cache_read, above this many prefix tokens, re-processed the conversation at the write price instead of reading it back. Below the floor a turn is too small to say either way. Checked against 413 transcripts on this machine: 4.5% of ordinary turns above 20,000 tokens cross this test, against 86% of the turns immediately following a compaction.",
   "static_prefix_tokens": 60000,
   "hook_latency_ms_per_tool_call": 2000,
   "hook_injected_bytes_per_session": 4000,

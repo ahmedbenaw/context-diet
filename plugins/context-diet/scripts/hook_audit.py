@@ -23,7 +23,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdlib import claude_settings, load_config  # noqa: E402
 
-HOME = Path.home() / ".claude"
+def audit_home() -> Path:
+    """The home directory being audited. CONTEXT_DIET_HOME overrides it for tests.
+
+    Without the seam the inert-rule scan can only read the developer's own home,
+    so the gate had to assert that particular machine's stray rules and went red
+    on any clean checkout.
+    """
+    override = os.environ.get("CONTEXT_DIET_HOME")
+    return Path(override) if override else Path.home()
+
+
+HOME = audit_home() / ".claude"
 
 
 def expand(command: str) -> str:
@@ -33,7 +44,7 @@ def expand(command: str) -> str:
     twice and runs twice. Only normalisation makes that visible.
     """
     text = os.path.expandvars(command or "")
-    text = text.replace(str(Path.home()), "~")
+    text = text.replace(str(audit_home()), "~")
     return " ".join(text.split())
 
 
@@ -169,19 +180,19 @@ def inert_hookify_rules() -> list:
     directory. Everywhere else it is a file that looks active and is not.
     """
     findings = []
-    for candidate in sorted(Path.home().glob(".claude/hookify.*.local.md")):
+    for candidate in sorted(audit_home().glob(".claude/hookify.*.local.md")):
         findings.append(
             {
                 "rule": str(candidate),
-                "loads_only_when_cwd_is": str(Path.home()),
+                "loads_only_when_cwd_is": str(audit_home()),
                 "why": "config_loader globs .claude/hookify.*.local.md relative to cwd",
             }
         )
-    for candidate in sorted(Path.home().glob("hookify.*.local.md")):
+    for candidate in sorted(audit_home().glob("hookify.*.local.md")):
         findings.append(
             {
                 "rule": str(candidate),
-                "loads_only_when_cwd_is": str(Path.home()),
+                "loads_only_when_cwd_is": str(audit_home()),
                 "why": "not under a project .claude directory",
             }
         )

@@ -12,10 +12,16 @@
 
 set -euo pipefail
 
-REPO="${1:-$(pwd)}"
-TRACKING_URI="${MLFLOW_TRACKING_URI:-file://${REPO}/.claude/context-diet/mlruns}"
+# Absolutise. A relative REPO leaks a relative path into the tracking URI and
+# into the promote command, which then resolve against whatever cwd runs them.
+REPO="$(cd "${1:-$(pwd)}" && pwd)"
+# MLflow 3.16 put the filesystem store into maintenance mode and refuses a
+# file:// URI, so the default is a local SQLite file. It must be the SAME store
+# the Python sink writes to, or the MCP server reads an empty database while
+# every script logs somewhere else.
+TRACKING_URI="${MLFLOW_TRACKING_URI:-sqlite:///${REPO}/.claude/context-diet/mlflow.db}"
 MCP_JSON="${REPO}/.mcp.json"
-MLRUNS="${REPO}/.claude/context-diet/mlruns"
+STORE_DIR="${REPO}/.claude/context-diet"
 STATUS="ok"
 
 say() { printf 'context-diet bootstrap: %s\n' "$1"; }
@@ -43,12 +49,26 @@ PY
   fi
 fi
 
-mkdir -p "$MLRUNS"
+mkdir -p "$STORE_DIR"
 
-if [ -f "$MCP_JSON" ] && grep -q '"mlflow-mcp"' "$MCP_JSON" 2>/dev/null; then
-  say "mlflow-mcp already registered (project scope)"
+# Reconcile on content, not on presence. Checking only that the key existed left
+# a stale tracking URI in place forever, so the MCP server read an empty store
+# while every script logged to a different one.
+CURRENT_URI=""
+if [ -f "$MCP_JSON" ]; then
+  CURRENT_URI="$(python3 -c 'import json,sys,pathlib
+try:
+    d = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    print(""); raise SystemExit
+s = (d.get("mcpServers") or {}).get("mlflow-mcp") or {}
+print((s.get("env") or {}).get("MLFLOW_TRACKING_URI") or "")' "$MCP_JSON" 2>/dev/null || true)"
+fi
+
+if [ "$CURRENT_URI" = "$TRACKING_URI" ]; then
+  say "mlflow-mcp already registered with this tracking URI (project scope)"
 else
-  python3 - "$MCP_JSON" "$TRACKING_URI" <<'PY'
+  if python3 - "$MCP_JSON" "$TRACKING_URI" <<'PY'
 import json, sys, pathlib
 target = pathlib.Path(sys.argv[1])
 uri = sys.argv[2]
@@ -64,9 +84,23 @@ servers["mlflow-mcp"] = {
     "args": ["run", "--with", "mlflow[mcp]>=3.5.1", "mlflow", "mcp", "run"],
     "env": {"MLFLOW_TRACKING_URI": uri},
 }
-target.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+# An unwritable .mcp.json is an ordinary outcome, not a crash: it is a
+# security-sensitive file that a sandbox or a read-only checkout may protect.
+# Say which value it needs and exit non-zero so the caller can report it.
+try:
+    target.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+except OSError as exc:
+    sys.stderr.write("cannot write %s: %s\n" % (target, exc))
+    raise SystemExit(3)
 PY
-  say "wrote ${MCP_JSON} (project scope)"
+  then
+    say "wrote ${MCP_JSON} (project scope)"
+  else
+    say "could not write ${MCP_JSON}; it needs MLFLOW_TRACKING_URI set to:"
+    say "  ${TRACKING_URI}"
+    say "until then the MCP server reads a different store than the scripts write"
+    STATUS="unregistered"
+  fi
 fi
 
 say "tracking ${TRACKING_URI} · status ${STATUS}"

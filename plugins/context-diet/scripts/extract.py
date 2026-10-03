@@ -22,20 +22,20 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cdlib import Tokenizer, load_config  # noqa: E402
+from cdlib import Tokenizer, fence_mask, heading_level, load_config  # noqa: E402
 
 
-def heading_level(line: str) -> int:
-    stripped = line.lstrip()
-    if not stripped.startswith("#"):
-        return 0
-    hashes = len(stripped) - len(stripped.lstrip("#"))
-    return hashes if stripped[hashes : hashes + 1] == " " else 0
+def section_id(path: Path, crumb: list, heading: str, occurrence: int) -> str:
+    """A stable id that is unique even when two sections share a name.
 
-
-def section_id(path: Path, crumb: list, heading: str) -> str:
-    digest = hashlib.sha256(("/".join(crumb) + "|" + heading).encode("utf-8")).hexdigest()[:8]
-    return "%s#%s" % (path.name, digest)
+    The digest used to cover the crumb and the heading only, and the crumb
+    already ends with that heading, so two identically named sections under one
+    parent produced the same id and /apply cut whichever came first. The
+    occurrence ordinal distinguishes them, and unlike a line number it does not
+    churn when unrelated text above is edited.
+    """
+    key = "/".join(crumb) + "|" + heading + "|#" + str(occurrence)
+    return "%s#%s" % (path.name, hashlib.sha256(key.encode("utf-8")).hexdigest()[:8])
 
 
 def extract(path: Path, tok: Tokenizer) -> dict:
@@ -44,8 +44,14 @@ def extract(path: Path, tok: Tokenizer) -> dict:
     except OSError as exc:
         return {"path": str(path), "error": str(exc), "sections": []}
     lines = text.splitlines()
+    # A hash at the start of a line inside a bash block is a shell comment, not
+    # a heading. Without this the section boundaries here disagreed with the
+    # ones patch.py computed, so the id in a plan pointed at a different span of
+    # text than the one /apply would cut.
+    fenced = fence_mask(lines)
     sections = []
     crumb: list = []
+    seen: dict = {}
     current = None
 
     def close(end_line: int) -> None:
@@ -61,14 +67,19 @@ def extract(path: Path, tok: Tokenizer) -> dict:
         sections.append(current)
 
     for i, line in enumerate(lines, start=1):
-        level = heading_level(line)
+        level = 0 if fenced[i - 1] else heading_level(line.lstrip())
         if level:
             close(i - 1)
             crumb = crumb[: level - 1]
             crumb.append(line.lstrip("#").strip())
+            key = ("/".join(crumb), line.strip())
+            seen[key] = seen.get(key, 0) + 1
             current = {
-                "id": section_id(path, crumb, line.strip()),
+                "id": section_id(path, crumb, line.strip(), seen[key]),
                 "heading": line.strip(),
+                # Which occurrence of this exact heading line this is, 1-based.
+                # patch.py refuses to cut an ambiguous heading without it.
+                "occurrence": seen[key],
                 "level": level,
                 "path": "/".join(crumb),
                 "start_line": i,
@@ -77,7 +88,7 @@ def extract(path: Path, tok: Tokenizer) -> dict:
         else:
             if current is None:
                 current = {
-                    "id": section_id(path, ["(preamble)"], "(preamble)"),
+                    "id": section_id(path, ["(preamble)"], "(preamble)", 1),
                     "heading": "(preamble)",
                     "level": 0,
                     "path": "(preamble)",

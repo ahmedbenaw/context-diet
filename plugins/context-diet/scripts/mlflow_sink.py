@@ -12,12 +12,16 @@ self-contradiction this plugin exists to catch.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cdlib import load_config  # noqa: E402
+from cdlib import load_config, state_dir  # noqa: E402
+
+REMOTE_SCHEMES = ("http", "https", "ftp", "ftps", "postgresql", "postgres",
+                  "mysql", "mssql", "databricks", "s3", "gs", "azure", "wasbs")
 
 NUMERIC_FIELDS = (
     "turns",
@@ -72,6 +76,24 @@ def resolve_uri(uri: str, project: str = ".") -> str:
         except OSError:
             pass
         return "sqlite:///" + str(db)
+
+    # Anything else is a network destination. The plugin's stated non-goal is
+    # that it starts no server and makes no network call by default, and a
+    # tracking URI lives in a config file that travels with a repo, so a cloned
+    # repo carrying `http://…` would quietly post this machine's session
+    # metadata off-box. A remote store stays possible, but as the user's
+    # explicit choice in their own environment rather than a repo's.
+    scheme = uri.split("://", 1)[0].lower() if "://" in uri else ""
+    if scheme in REMOTE_SCHEMES:
+        if os.environ.get("CONTEXT_DIET_ALLOW_REMOTE_MLFLOW", "").lower() in ("1", "true", "yes"):
+            return uri
+        sys.stderr.write(
+            "context-diet: refusing the remote MLflow tracking URI %r from configuration. "
+            "Session metadata would leave this machine. Set "
+            "CONTEXT_DIET_ALLOW_REMOTE_MLFLOW=1 if that is what you want; logging to the "
+            "local store until then.\n" % uri[:120]
+        )
+        return ""
     return uri
 
 
@@ -95,10 +117,44 @@ def available(cfg: dict | None = None) -> bool:
     return _mlflow(cfg or load_config(".")) is not None
 
 
-def log_session(row: dict, cfg: dict | None = None) -> bool:
+def drain_pending(cfg: dict | None = None, project: str = ".") -> int:
+    """Log the Stop hook's queued session rows, then clear the queue.
+
+    The Stop hook cannot import MLflow: doing so cost about two seconds per
+    session end and printed to stderr, breaking its stdlib-only contract. It
+    queues rows instead and this runs from the command layer. Returns how many
+    rows were logged, and logs nothing when MLflow is absent so the queue
+    survives until it is installed.
+    """
+    cfg = cfg or load_config(project)
+    pending = state_dir(project) / "mlflow-pending.jsonl"
+    if not pending.is_file():
+        return 0
+    if _mlflow(cfg, project) is None:
+        return 0
+    logged = 0
+    try:
+        rows = [line for line in pending.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return 0
+    for line in rows:
+        try:
+            if log_session(json.loads(line), cfg, project):
+                logged += 1
+        except Exception:
+            continue
+    if logged == len(rows):
+        try:
+            pending.unlink()
+        except OSError:
+            pass
+    return logged
+
+
+def log_session(row: dict, cfg: dict | None = None, project: str = ".") -> bool:
     """One MLflow run per session, with the model as a tag and signals as metrics."""
-    cfg = cfg or load_config(".")
-    mlflow = _mlflow(cfg)
+    cfg = cfg or load_config(project)
+    mlflow = _mlflow(cfg, project)
     if mlflow is None:
         return False
     try:

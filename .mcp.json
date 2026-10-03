@@ -11,7 +11,7 @@
       ],
       "command": "uv",
       "env": {
-        "MLFLOW_TRACKING_URI": "file:///Users/ben/Claude/Projects/context-diet/.claude/context-diet/mlruns"
+        "MLFLOW_TRACKING_URI": "sqlite:///./.claude/context-diet/mlflow.db"
       }
     }
   }

@@ -10,6 +10,7 @@ silent until the threshold and never speaks twice about the same path.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -47,42 +48,58 @@ def main() -> int:
         cfg = load_config(cwd)
         threshold = int(cfg.get("repeat_read_threshold") or 3)
         try:
-            mtime = int(Path(target).stat().st_mtime)
+            st = Path(target).stat()
+            # Whole-second mtime cannot tell an edit from a re-read inside the
+            # same second, so an edit-then-read was counted as an unchanged
+            # repeat. Nanoseconds plus size is what actually distinguishes them,
+            # and the gate no longer has to sleep 1.1 s to hide it.
+            stamp = [st.st_mtime_ns, st.st_size]
         except OSError:
             return 0
 
         store = state_dir(cwd) / "reads"
         store.mkdir(parents=True, exist_ok=True)
-        key = "%s.json" % (session_id or "nosession")
-        path = store / key
-        try:
-            data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-        except (OSError, ValueError):
-            data = {}
 
-        entry = data.get(target) or {"count": 0, "mtime": mtime, "said": False}
-        if entry.get("mtime") != mtime:
-            # The file changed, so re-reading it is not a repeat read.
-            entry = {"count": 0, "mtime": mtime, "said": False}
-        entry["count"] += 1
-        data[target] = entry
+        # Counting by read-modify-write loses reads. Hooks run in parallel, and
+        # even one file per path lost 4 of 50 concurrent reads of that path:
+        # every process read the same number and the last writer won. So no
+        # process ever writes a count. Each read appends one line to a file
+        # whose name already carries the file's identity, and the count is the
+        # number of lines. An O_APPEND write of a few bytes does not interleave,
+        # so nothing is lost and nothing has to be locked.
+        #
+        # The version stamp is part of the name, so an edit starts a new file
+        # and the old count is simply not consulted again.
+        ident = "%s\x00%s\x00%s" % (target, stamp[0], stamp[1])
+        digest = hashlib.sha256(ident.encode("utf-8", "replace")).hexdigest()[:16]
+        tally = store / ("%s.%s.reads" % (session_id or "nosession", digest))
         try:
-            path.write_text(json.dumps(data), encoding="utf-8")
+            fd = os.open(str(tally), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.write(fd, b".")
+            finally:
+                os.close(fd)
+            count = tally.stat().st_size
         except OSError:
             return 0
 
-        if entry["count"] >= threshold and not entry["said"]:
-            entry["said"] = True
-            data[target] = entry
-            try:
-                path.write_text(json.dumps(data), encoding="utf-8")
-            except OSError:
-                pass
-            sys.stdout.write(
-                "context-diet: %s has been read %d times unchanged this session. Hoisting a "
-                "short summary of it would stop paying for the whole file each time.\n"
-                % (target, entry["count"])
-            )
+        if count < threshold:
+            return 0
+
+        # Exactly one process may speak, whoever creates the marker first.
+        said = tally.with_suffix(".said")
+        try:
+            os.close(os.open(str(said), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        except FileExistsError:
+            return 0
+        except OSError:
+            return 0
+
+        sys.stdout.write(
+            "context-diet: %s has been read %d times unchanged this session. Hoisting a "
+            "short summary of it would stop paying for the whole file each time.\n"
+            % (target, count)
+        )
         return 0
     except Exception:
         return 0

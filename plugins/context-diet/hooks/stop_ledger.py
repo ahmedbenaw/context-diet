@@ -21,9 +21,22 @@ HOOK = "stop_ledger"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 
+def at_least(truncated: bool) -> str:
+    """Say so when a figure stopped counting early, rather than stating it as the total."""
+    return "at least " if truncated else ""
+
+
 def dir_size(path: Path, cap_files: int = 20000) -> tuple:
+    """(total_bytes, file_count, truncated).
+
+    The walk stops at cap_files so a Stop hook cannot be held open by a huge
+    store. It used to return the partial total with nothing to say so, and the
+    caller reported it as the size of the directory. A number that stopped
+    counting early is not that directory's size, so the caller is told.
+    """
     total = 0
     count = 0
+    truncated = False
     try:
         for p in path.rglob("*"):
             try:
@@ -31,12 +44,13 @@ def dir_size(path: Path, cap_files: int = 20000) -> tuple:
                     total += p.stat().st_size
                     count += 1
                     if count >= cap_files:
+                        truncated = True
                         break
             except OSError:
                 continue
     except OSError:
         pass
-    return (total, count)
+    return (total, count, truncated)
 
 
 def storage_signals(cwd: str, cfg: dict, state_dir) -> list:
@@ -54,21 +68,41 @@ def storage_signals(cwd: str, cfg: dict, state_dir) -> list:
 
     lines = []
     transcripts = Path.home() / ".claude" / "projects"
-    size, count = dir_size(transcripts)
+    size, count, cut = dir_size(transcripts)
     if size >= int(cfg.get("transcript_store_bytes") or 10**9) or count >= int(
         cfg.get("transcript_store_files") or 1000
     ):
         lines.append(
-            "transcript store: %.1f GB across %d files at %s. Nothing was deleted."
-            % (size / 1e9, count, transcripts)
+            "transcript store: %s%.1f GB across %d files at %s. Nothing was deleted."
+            % (at_least(cut), size / 1e9, count, transcripts)
         )
-    for key, sub in (("backups_store_bytes", "backups"), ("mlflow_store_bytes", "mlruns")):
-        target = state_dir(cwd) / sub
-        if not target.is_dir():
-            continue
-        s, c = dir_size(target)
-        if s >= int(cfg.get(key) or 10**8):
-            lines.append("%s: %.0f MB across %d files. Nothing was deleted." % (sub, s / 1e6, c))
+    backups = state_dir(cwd) / "backups"
+    if backups.is_dir():
+        s, c, cut = dir_size(backups)
+        if s >= int(cfg.get("backups_store_bytes") or 10**8):
+            lines.append("backups: %s%.0f MB across %d files. Nothing was deleted."
+                         % (at_least(cut), s / 1e6, c))
+
+    # The MLflow store is a SQLite file, not a directory. Measuring only the old
+    # mlruns directory reported zero bytes forever while the real store grew
+    # unwatched, so both shapes count and a legacy directory still registers.
+    store = state_dir(cwd)
+    mlflow_bytes, mlflow_files = 0, 0
+    db = store / "mlflow.db"
+    if db.is_file():
+        mlflow_bytes += db.stat().st_size
+        mlflow_files += 1
+    legacy = store / "mlruns"
+    mlflow_cut = False
+    if legacy.is_dir():
+        s, c, mlflow_cut = dir_size(legacy)
+        mlflow_bytes += s
+        mlflow_files += c
+    if mlflow_files and mlflow_bytes >= int(cfg.get("mlflow_store_bytes") or 10**8):
+        lines.append(
+            "mlflow store: %s%.0f MB across %d file(s). Nothing was deleted."
+            % (at_least(mlflow_cut), mlflow_bytes / 1e6, mlflow_files)
+        )
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps({"at": now, "lines": lines}), encoding="utf-8")
@@ -169,12 +203,18 @@ def main() -> int:
         row["ledger_ms"] = int((time.time() - started) * 1000)
         append_ledger(row, cwd, cfg)
 
+        # The hook layer never imports MLflow. Importing it here cost about two
+        # seconds per session end and printed a hint to stderr, which broke both
+        # this hook's stdlib-only contract and its promise to stay silent. The
+        # row is queued instead, and the command layer drains the queue into
+        # MLflow when a report runs.
         try:
-            from mlflow_sink import log_session  # noqa: PLC0415
-
-            log_session(row, cfg)
-        except Exception:
-            # MLflow is an optional extra. Its absence is never an error here.
+            pending = state_dir(cwd) / "mlflow-pending.jsonl"
+            pending.parent.mkdir(parents=True, exist_ok=True)
+            with pending.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, sort_keys=True) + "\n")
+        except OSError:
+            # A queue that cannot be written is not worth failing a session over.
             pass
         return 0
     except Exception:

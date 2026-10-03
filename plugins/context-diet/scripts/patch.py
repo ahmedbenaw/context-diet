@@ -30,9 +30,14 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cdlib import PLUGIN_ROOT, append_decision, state_dir  # noqa: E402
+from cdlib import (  # noqa: E402
+    PLUGIN_ROOT, append_decision, fence_mask, heading_level, state_dir,
+)
 
 INSTRUCTION_NAMES = ("CLAUDE.md", "AGENTS.md", "CLAUDE.local.md", "AGENTS.local.md")
+# cut_section removes a markdown heading and its body. Nothing else is a
+# legitimate target, so the fence refuses every other file type outright.
+MARKDOWN_SUFFIXES = (".md", ".markdown")
 
 
 def sha256(path: Path) -> str:
@@ -43,9 +48,8 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def in_instruction_layer(path: Path) -> bool:
-    """The write fence. Everything outside it is refused, not warned about."""
-    p = path.resolve()
+def in_located_layer(p: Path) -> bool:
+    """Is this path inside the directories the plugin is allowed to touch?"""
     if p.name in INSTRUCTION_NAMES:
         return True
     parts = p.parts
@@ -64,34 +68,88 @@ def in_instruction_layer(path: Path) -> bool:
         return False
 
 
+def in_instruction_layer(path: Path) -> bool:
+    """The write fence. Everything outside it is refused, not warned about.
+
+    Location alone is not enough. Allowing anything under the plugin root, or
+    anything under a .claude/hooks directory, let a plan name this file, a hook,
+    or the gate suite and have a markdown heading cut out of Python source. The
+    fence is conjunctive: the path must sit in an allowed directory AND be a
+    markdown file, which is the only thing cut_section can meaningfully edit.
+    """
+    p = path.resolve()
+    return in_located_layer(p) and p.suffix.lower() in MARKDOWN_SUFFIXES
+
+
+def relative_to_project(path: Path, project: str) -> str:
+    """A path to log. Absolute paths leak the home directory into a public file.
+
+    decisions.tsv is tracked and published, and it already carried this user's
+    home layout because revert logged str(dst).
+    """
+    try:
+        return str(Path(path).resolve().relative_to(Path(project).resolve()))
+    except (ValueError, OSError):
+        return Path(path).name
+
+
 def backups_root(project: str) -> Path:
     return state_dir(project) / "backups"
 
 
-def cut_section(text: str, heading: str) -> tuple:
-    """Remove one section by its exact heading line. Returns (new_text, removed)."""
-    lines = text.splitlines(keepends=True)
+def cut_section(text: str, heading: str, occurrence: int = 0) -> tuple:
+    """Remove one section by its exact heading line.
+
+    Returns (new_text, removed, problem). `problem` is "" on success, and names
+    the reason on a refusal.
+
+    A heading is not a unique key. Two `### Notes` under two different parents,
+    or two identically named sections under one parent, all match the same
+    string, and this used to take whichever came first. Silently cutting the
+    wrong section is the worst thing an irreversible-feeling edit can do, so an
+    ambiguous heading with no occurrence given is refused rather than guessed.
+    `occurrence` is 1-based and comes from the section id extract.py assigned.
+    """
     target = heading.strip()
-    start = None
-    level = 0
+    if not target:
+        return (text, "", "no heading given")
+    lines = text.splitlines(keepends=True)
+    fenced = fence_mask(lines)
+
+    matches = []
     for i, line in enumerate(lines):
-        if line.strip() == target:
-            start = i
-            stripped = line.lstrip()
-            level = len(stripped) - len(stripped.lstrip("#"))
-            break
-    if start is None:
-        return (text, "")
+        if fenced[i]:
+            continue
+        if line.strip() != target:
+            continue
+        # The line matched but is not a heading, so there is no section here to
+        # cut. Treating it as level 0 made the terminator test unsatisfiable and
+        # deleted everything from here to the end of the file. A non-heading
+        # match is a miss, not a cut.
+        level = heading_level(line.lstrip())
+        if level:
+            matches.append((i, level))
+
+    if not matches:
+        return (text, "", "no section with that heading")
+    if len(matches) > 1 and not occurrence:
+        return (text, "", "heading appears %d times and the plan did not say which"
+                % len(matches))
+    index = (occurrence or 1) - 1
+    if index < 0 or index >= len(matches):
+        return (text, "", "occurrence %d requested but the heading appears %d time(s)"
+                % (occurrence, len(matches)))
+    start, level = matches[index]
     end = len(lines)
     for j in range(start + 1, len(lines)):
-        stripped = lines[j].lstrip()
-        if stripped.startswith("#"):
-            this_level = len(stripped) - len(stripped.lstrip("#"))
-            if 0 < this_level <= level:
-                end = j
-                break
+        if fenced[j]:
+            continue
+        this_level = heading_level(lines[j].lstrip())
+        if 0 < this_level <= level:
+            end = j
+            break
     removed = "".join(lines[start:end])
-    return ("".join(lines[:start] + lines[end:]), removed)
+    return ("".join(lines[:start] + lines[end:]), removed, "")
 
 
 def do_apply(args) -> int:
@@ -123,6 +181,13 @@ def do_apply(args) -> int:
             )
         if "tokens" not in cut:
             problems.append("cut has no token figure: %s" % cut.get("section_heading"))
+        # Decode every target up front. read_text is strict and used to run
+        # inside the mutation loop, so one undecodable byte in a later file left
+        # an earlier file already rewritten with no index to revert from.
+        try:
+            target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            problems.append("cannot read as UTF-8, refused: %s (%s)" % (target, type(exc).__name__))
     if problems:
         for p in problems:
             sys.stderr.write("refused: %s\n" % p)
@@ -149,14 +214,23 @@ def do_apply(args) -> int:
             {"original": str(target), "backup": safe_name, "sha256_before": sha256(target)}
         )
 
+    # Write the index before the first mutation, not after the last one. A
+    # crash between the two used to leave modified files beside a backup set
+    # with no index, which revert reports as "backup set has no index".
+    (backup_dir / "INDEX.json").write_text(
+        json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
     applied = 0
     for cut in cuts:
         target = Path(cut["file"]).resolve()
         text = target.read_text(encoding="utf-8")
-        new_text, removed = cut_section(text, cut.get("section_heading", ""))
-        if not removed:
-            sys.stderr.write("section not found, skipped: %s in %s\n"
-                             % (cut.get("section_heading"), target))
+        new_text, removed, problem = cut_section(
+            text, cut.get("section_heading", ""), int(cut.get("occurrence") or 0))
+        if problem or not removed:
+            sys.stderr.write(
+                "skipped %s in %s: %s\n"
+                % (cut.get("section_heading"), target, problem or "nothing was removed"))
             continue
         target.write_text(new_text, encoding="utf-8")
         applied += 1
@@ -167,9 +241,6 @@ def do_apply(args) -> int:
             "bucket=%s reason=%s backup=%s" % (cut.get("bucket"), cut.get("reason"), stamp),
         )
 
-    (backup_dir / "INDEX.json").write_text(
-        json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
     sys.stdout.write(
         "applied %d of %d cut(s). Backup: %s\nRevert with: patch.py revert --project %s\n"
         % (applied, len(cuts), backup_dir, args.project)
@@ -192,19 +263,50 @@ def do_revert(args) -> int:
         sys.stderr.write("backup set has no index: %s\n" % chosen)
         return 1
     index = json.loads(index_path.read_text(encoding="utf-8"))
-    restored = 0
-    for entry in index["files"]:
-        src = chosen / entry["backup"]
-        dst = Path(entry["original"])
-        if not src.is_file():
-            sys.stderr.write("missing backup file, skipped: %s\n" % src)
+
+    # Validate the whole index before writing a single byte. An INDEX.json is
+    # just a file on disk, and a repo can ship one, so its paths are input, not
+    # instructions: an unchecked `original` restored to any absolute path on the
+    # machine, and the checksum afterwards only compared the written file to the
+    # blob that had just been written, which assures nothing. Restore is
+    # all-or-nothing, and every entry is checked first.
+    planned = []
+    problems = []
+    for entry in index.get("files") or []:
+        name = str(entry.get("backup", ""))
+        if not name or Path(name).name != name or name in (".", ".."):
+            problems.append("backup name is not a plain filename: %r" % name)
             continue
+        src = chosen / name
+        if not src.is_file():
+            problems.append("missing backup file: %s" % src)
+            continue
+        dst = Path(str(entry.get("original", ""))).resolve()
+        if not in_instruction_layer(dst):
+            problems.append("restore target is outside the instruction layer: %s" % dst)
+            continue
+        recorded = str(entry.get("sha256_before", ""))
+        actual = sha256(src)
+        if not recorded or actual != recorded:
+            problems.append("backup blob does not match its recorded checksum: %s" % src)
+            continue
+        planned.append((src, dst, recorded))
+
+    if problems:
+        for p in problems:
+            sys.stderr.write("refused: %s\n" % p)
+        sys.stderr.write("nothing was restored\n")
+        return 1
+
+    restored = 0
+    for src, dst, recorded in planned:
         shutil.copy2(src, dst)
-        if sha256(dst) != entry["sha256_before"]:
+        if sha256(dst) != recorded:
             sys.stderr.write("restored file does not match its recorded checksum: %s\n" % dst)
             return 1
         restored += 1
-        append_decision("revert", str(dst), entry["sha256_before"][:12], "from %s" % chosen.name)
+        append_decision("revert", relative_to_project(dst, args.project), recorded[:12],
+                        "from %s" % chosen.name)
     sys.stdout.write("restored %d file(s) from %s, each verified by checksum\n"
                      % (restored, chosen.name))
     return 0

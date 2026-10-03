@@ -41,9 +41,19 @@ def main() -> int:
     try:
         if disabled(HOOK, session_id, cwd):
             return 0
+        # Skipping whenever any manifest existed was wrong, because the amber
+        # monitor writes one with armed=False. A session that went amber and
+        # then compacted therefore handed over nothing: the file was present,
+        # this hook stood down, and SessionStart ignores an unarmed manifest.
+        # Only an armed manifest means the job is already done.
         existing = handoff_dir(cwd) / ("%s.json" % (session_id or "nosession"))
         if existing.is_file():
-            return 0
+            try:
+                prior = json.loads(existing.read_text(encoding="utf-8"))
+                if isinstance(prior, dict) and prior.get("armed"):
+                    return 0
+            except (OSError, ValueError):
+                pass  # unreadable or truncated: rebuild it rather than trust it
         manifest = build_manifest(payload, cwd, session_id, "precompact")
         kept, _problems = verify_manifest(manifest, cwd)
         write_manifest(kept, cwd, session_id, armed=True)

@@ -26,6 +26,9 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cdlib import cache_state, hit_ratio, load_config, median, spread  # noqa: E402
+
 # A Read whose path ends in one of these, or sits under a .claude directory,
 # is an instruction-file read. This is H1's whole definition.
 INSTRUCTION_BASENAMES = ("CLAUDE.md", "AGENTS.md", "CLAUDE.local.md", "AGENTS.local.md")
@@ -52,6 +55,19 @@ COLUMNS = [
     "h4_injected_bytes",
     "h4_top_injector",
     "h4_top_injector_bytes",
+    # Where the built-in compactor actually fired. Part 5.3 requires Amber to
+    # sit strictly below it, and until now that was reasoned about rather than
+    # measured, even though every compaction record states it outright.
+    # H5: the cache. A read is billed at a fraction of a write, so the share of
+    # prefix tokens served from cache is the number tied to money. A session
+    # that re-creates its prefix is paying full price for tokens it already had.
+    "h5_cache_hit_ratio",
+    "h5_cold_starts",
+    "h5_cold_start_tokens",
+    "compactor_events",
+    "compactor_auto_events",
+    "compactor_lowest_auto_pre_tokens",
+    "compactor_dropped_tokens",
     "fresh_input",
     "cache_creation",
     "cache_read",
@@ -111,10 +127,12 @@ def new_model_bucket() -> dict:
         "h2_cache_read_last": 0,
         "top_result_bytes": 0,
         "top_result_name": "",
+        "h5_cold_starts": 0,
+        "h5_cold_start_tokens": 0,
     }
 
 
-def analyze(path: Path) -> dict:
+def analyze(path: Path, cold_floor: int = 20000) -> dict:
     """One transcript -> per-model rows plus session-level hook measurements.
 
     H3 and H4 are session-level: a hook's wall-clock and injected bytes are not
@@ -126,7 +144,10 @@ def analyze(path: Path) -> dict:
     hook_ms_by_name: dict = defaultdict(int)
     injected_by_hook: dict = defaultdict(int)
     session_id = ""
-    last_hook_name = ""
+    compactions = 0
+    auto_compactions = 0
+    lowest_auto_pre = 0
+    dropped = 0
     tool_use_model: dict = {}
     tool_use_name: dict = {}
     current_model = ""
@@ -156,6 +177,18 @@ def analyze(path: Path) -> dict:
                 bucket["h2_prefix_tokens"] = cc
                 bucket["h2_cache_read_first"] = cr
             bucket["h2_cache_read_last"] = cr
+            # H5: a turn that re-created more of the prefix than it read back
+            # paid the write price for tokens it already had. Turn 1 is excluded
+            # because a session's first turn has nothing to read and would count
+            # every session as one cold start.
+            if bucket["turns"] > 1:
+                state, created, _read = cache_state({
+                    "cache_creation_input_tokens": cc,
+                    "cache_read_input_tokens": cr,
+                }, cold_floor)
+                if state == "cold":
+                    bucket["h5_cold_starts"] += 1
+                    bucket["h5_cold_start_tokens"] += created
             for blk in msg.get("content") or []:
                 if not isinstance(blk, dict) or blk.get("type") != "tool_use":
                     continue
@@ -198,7 +231,22 @@ def analyze(path: Path) -> dict:
                     name = result.get("toolName") or result.get("tool") or ""
                 bucket["top_result_name"] = name or "(tool not resolvable)"
 
-        elif rtype == "attachment":
+        cm = rec.get("compactMetadata")
+        if isinstance(cm, dict):
+            compactions += 1
+            pre = cm.get("preTokens")
+            if cm.get("trigger") == "auto":
+                auto_compactions += 1
+                if isinstance(pre, int) and pre > 0:
+                    # The smallest window at which the built-in compactor was
+                    # seen to fire. Amber has to sit below this, not below a
+                    # setting that may not be what the client acts on.
+                    lowest_auto_pre = min(lowest_auto_pre or pre, pre)
+            got = cm.get("cumulativeDroppedTokens")
+            if isinstance(got, int):
+                dropped = max(dropped, got)
+
+        if rtype == "attachment":
             att = rec.get("attachment") or {}
             atype = att.get("type")
             if atype in ("hook_success", "hook_non_blocking_error"):
@@ -207,19 +255,27 @@ def analyze(path: Path) -> dict:
                 ms = int(att.get("durationMs") or 0)
                 hook_ms_by_event[event] += ms
                 hook_ms_by_name[name] += ms
-                last_hook_name = name
             elif atype == "hook_additional_context":
                 content = att.get("content")
                 if isinstance(content, list):
                     size = sum(len(str(c)) for c in content)
                 else:
                     size = len(str(content or ""))
-                injected_by_hook[last_hook_name or "(unattributed)"] += size
+                # Every one of these carries its own hookName: 763 of 763 across
+                # this machine's transcripts. Charging the bytes to whichever
+                # hook happened to run most recently invented an attribution the
+                # record already stated, and mis-stated it whenever a hook
+                # injected without having logged a hook_success first.
+                injected_by_hook[att.get("hookName") or "(unattributed)"] += size
 
     top_event = max(hook_ms_by_event.items(), key=lambda kv: kv[1], default=("", 0))
     top_injector = max(injected_by_hook.items(), key=lambda kv: kv[1], default=("", 0))
     return {
         "session_id": session_id,
+        "compactor_events": compactions,
+        "compactor_auto_events": auto_compactions,
+        "compactor_lowest_auto_pre_tokens": lowest_auto_pre,
+        "compactor_dropped_tokens": dropped,
         "models": models,
         "h3_total": sum(hook_ms_by_event.values()),
         "h3_top_event": top_event[0],
@@ -259,6 +315,15 @@ def rows_for(path: Path, result: dict) -> list:
                 "h4_injected_bytes": result["h4_total"],
                 "h4_top_injector": result["h4_top"],
                 "h4_top_injector_bytes": result["h4_top_bytes"],
+                "h5_cache_hit_ratio": (
+                    round(ratio, 4) if (ratio := hit_ratio(b["cache_creation"], b["cache_read"]))
+                    is not None else ""),
+                "h5_cold_starts": b["h5_cold_starts"],
+                "h5_cold_start_tokens": b["h5_cold_start_tokens"],
+                "compactor_events": result["compactor_events"],
+                "compactor_auto_events": result["compactor_auto_events"],
+                "compactor_lowest_auto_pre_tokens": result["compactor_lowest_auto_pre_tokens"],
+                "compactor_dropped_tokens": result["compactor_dropped_tokens"],
                 "fresh_input": b["fresh_input"],
                 "cache_creation": b["cache_creation"],
                 "cache_read": b["cache_read"],
@@ -277,13 +342,6 @@ def model_sort_key(model: str) -> tuple:
         if tag in low:
             return (0, i, low)
     return (1, 0, low)
-
-
-def median(values: list) -> int:
-    if not values:
-        return 0
-    s = sorted(values)
-    return s[len(s) // 2]
 
 
 def summarize(rows: list) -> str:
@@ -336,7 +394,38 @@ def summarize(rows: list) -> str:
             h1 = "SUPPORTED"
         else:
             h1 = "REFUTED"
-        h2_growth_wins = median_growth > median_prefix
+        # H2 is decided per session, not by two medians. Each session is
+        # compared against itself: did its cache-read growth exceed its own
+        # turn-1 prefix? Sessions differ enormously in length, so a spread taken
+        # across them measures session length rather than noise, and pooling
+        # them called a 43x gap inconclusive. The verdict was previously the
+        # literal string "H2 SUPPORTED", which no transcript could contradict.
+        paired = [(r["h2_prefix_tokens"], r["h2_cache_read_growth"])
+                  for r in rs if r["h2_prefix_tokens"]]
+        n_paired = len(paired)
+        growth_sessions = sum(1 for pre, gro in paired if gro > pre)
+        if n_paired == 0:
+            h2 = "INCONCLUSIVE"
+            h2_because = "no session recorded a turn-1 prefix, so there is nothing to compare"
+            h2_growth_wins = False
+        else:
+            share_growth = growth_sessions / n_paired
+            h2_growth_wins = share_growth >= 0.5
+            if share_growth >= 0.6:
+                h2 = "SUPPORTED"
+                h2_because = (
+                    "accumulated output drives cost in %d of %d sessions"
+                    % (growth_sessions, n_paired))
+            elif share_growth <= 0.4:
+                h2 = "REFUTED"
+                h2_because = (
+                    "the static prefix drives cost in %d of %d sessions"
+                    % (n_paired - growth_sessions, n_paired))
+            else:
+                h2 = "INCONCLUSIVE"
+                h2_because = (
+                    "sessions split %d to %d between growth and prefix, which is too close "
+                    "to call" % (growth_sessions, n_paired - growth_sessions))
         h3 = "SUPPORTED" if median_hook_ms >= 2000 else "REFUTED"
         h4 = "SUPPORTED" if median_injected >= 4000 else "REFUTED"
 
@@ -350,23 +439,75 @@ def summarize(rows: list) -> str:
             % (h1, md, reads, share * 100, dot)
         )
         out.append(
-            "- **H2 SUPPORTED, %s drives cost** - median static prefix %s tokens, median "
-            "cache-read growth across a session %s tokens; largest single tool result %s bytes from %s."
+            "- **H2 %s, %s** - median static prefix %s tokens, median cache-read growth across "
+            "a session %s tokens; largest single tool result %s bytes from %s."
             % (
-                "accumulated output" if h2_growth_wins else "the static prefix",
-                format(median_prefix, ","),
-                format(median_growth, ","),
+                h2,
+                h2_because,
+                format(int(median_prefix), ","),
+                format(int(median_growth), ","),
                 format(top_result[1], ","),
                 top_result[0],
             )
         )
         out.append(
             "- **H3 %s** - median hook wall-clock per session %s ms."
-            % (h3, format(median_hook_ms, ","))
+            % (h3, format(int(median_hook_ms), ","))
         )
+        # H5: the cache. Read is billed at a fraction of write, so the share of
+        # prefix tokens served from cache is the figure with money attached. The
+        # 90% line is v4's; it is stated as the threshold being applied, not as
+        # something this census independently established.
+        ratios = [float(r["h5_cache_hit_ratio"]) for r in rs if r["h5_cache_hit_ratio"] != ""]
+        cold = sum(int(r["h5_cold_starts"] or 0) for r in rs)
+        cold_tokens = sum(int(r["h5_cold_start_tokens"] or 0) for r in rs)
+        if not ratios:
+            out.append(
+                "- **H5 INCONCLUSIVE** - no session recorded any prefix tokens, so there is no "
+                "hit ratio to report.")
+        else:
+            med_ratio = median(ratios)
+            below = sum(1 for r in ratios if r < 0.90)
+            spread_ratio = spread(ratios)
+            gap = abs(med_ratio - 0.90)
+            # The same rule the A/B report is held to. Sessions vary widely in
+            # how much of their prefix is cached, and a median two points from
+            # the line inside a spread of twenty is not a finding about the
+            # cache; it is a finding about which sessions happened to be in the
+            # sample. Without this the verdict flipped between two models whose
+            # medians differ by 2.4 points.
+            if gap <= spread_ratio:
+                h5, because = "INCONCLUSIVE", (
+                    "the median is %.1f points from the 90%% line and sessions vary by %.1f "
+                    "points, so the line does not separate them"
+                    % (gap * 100, spread_ratio * 100))
+            elif med_ratio < 0.90:
+                h5, because = "SUPPORTED", "the median sits below the line by more than sessions vary"
+            else:
+                h5, because = "REFUTED", "the median sits above the line by more than sessions vary"
+            out.append(
+                "- **H5 %s, %s** - median cache hit ratio %.1f%% across %d session(s), %d of "
+                "them below the 90%% line. %s cold turn(s) re-created %s tokens at the write "
+                "price that a warm turn would have read back. The 90%% line is the v4 "
+                "handover's threshold, applied here rather than established here."
+                % (h5, because, med_ratio * 100, len(ratios), below,
+                   format(cold, ","), format(cold_tokens, ",")))
+        autos = [r["compactor_lowest_auto_pre_tokens"] for r in rs if r["compactor_lowest_auto_pre_tokens"]]
+        if autos:
+            out.append(
+                "- **Built-in compactor** - fired automatically in %d session(s); the lowest "
+                "context it fired at was %s tokens. Amber must sit below that, and the plugin "
+                "never runs a second compaction of its own."
+                % (sum(1 for r in rs if r["compactor_auto_events"]), format(min(autos), ","))
+            )
+        else:
+            out.append(
+                "- **Built-in compactor** - not observed firing automatically for this model, so "
+                "there is no measured ceiling for Amber to sit below yet."
+            )
         out.append(
             "- **H4 %s** - median injected context %s bytes per session; top injector %s at %s bytes."
-            % (h4, format(median_injected, ","), top_injector[0], format(top_injector[1], ","))
+            % (h4, format(int(median_injected), ","), top_injector[0], format(top_injector[1], ","))
         )
         out.append("")
     return "\n".join(out)
@@ -377,7 +518,12 @@ def main() -> int:
     ap.add_argument("--projects", default=str(Path.home() / ".claude" / "projects"))
     ap.add_argument("--out", default=".")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--project", default=os.getcwd())
     args = ap.parse_args()
+
+    # H5's floor is a config key like every other threshold, so a wrong default
+    # is visible in the effective table rather than buried in this file.
+    cold_floor = int(load_config(args.project).get("cold_turn_min_tokens") or 20000)
 
     root = Path(args.projects)
     if not root.exists():
@@ -389,7 +535,7 @@ def main() -> int:
 
     rows = []
     for path in files:
-        rows.extend(rows_for(path, analyze(path)))
+        rows.extend(rows_for(path, analyze(path, cold_floor)))
 
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)

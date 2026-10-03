@@ -1,6 +1,8 @@
-# The fixture is a git repo of its own so the harness can reset between trials.
-# Tracking it from the parent would create an embedded gitlink that nobody can
-# clone usefully, so the harness recreates it from fixture-seed instead.
+# The fixture ships as ordinary tracked files with no .git of its own. The
+# harness copies it to a workspace and runs git init there, so it can reset
+# between trials without the parent repo ever holding an embedded gitlink that
+# nobody can clone usefully. The ignore below covers a .git only if someone
+# runs git inside the fixture by hand.
 plugins/context-diet/fixture/.git/
 plugins/context-diet/fixture/node_modules/
 plugins/context-diet/fixture/answer.txt
@@ -21,3 +23,14 @@ plugins/context-diet/tests/fixtures/big-store/
 
 # Local hookify rules, personal to this machine
 .claude/hookify.*.local.md
+
+# macOS directory metadata, never part of the plugin.
+.DS_Store
+**/.DS_Store
+
+# The v4 source tree is an input to the merge, not part of the plugin. The four
+# items Part 12.4 names are ported into plugins/context-diet; the rest stays out.
+incoming-v4/
+
+# refactor-chain board state, local to a session.
+.refactor-chain/

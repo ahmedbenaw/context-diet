@@ -20,7 +20,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cdlib import Tokenizer, load_config  # noqa: E402
+from cdlib import (  # noqa: E402
+    Tokenizer, effective_table_once, fence_mask, heading_level, load_config,
+)
 
 SECTION_PREFIXES = ("#", "##", "###", "####")
 
@@ -31,11 +33,15 @@ def split_sections(text: str) -> list:
     Text before the first heading is its own section so nothing is uncounted.
     """
     lines = text.splitlines()
+    # Same rule as extract.py and patch.py: a hash inside a fenced block is a
+    # shell comment. Counting it as a heading split one section into two and
+    # priced both wrongly.
+    fenced = fence_mask(lines)
     sections = []
     current = {"heading": "(preamble)", "line": 1, "body": []}
     for i, line in enumerate(lines, start=1):
         stripped = line.lstrip()
-        if stripped.startswith("#") and stripped.lstrip("#").startswith(" "):
+        if not fenced[i - 1] and heading_level(stripped):
             if current["body"] or current["heading"] != "(preamble)":
                 sections.append(current)
             current = {"heading": stripped.rstrip(), "line": i, "body": []}
@@ -199,6 +205,14 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config(args.project)
+    # The config file and cdlib both promise the first run prints this. Until
+    # now nothing called it, so a wrong threshold stayed invisible until it
+    # misfired. JSON output stays machine-readable and gets it on stderr.
+    table = effective_table_once(cfg, args.project)
+    if table:
+        stream = sys.stderr if args.json else sys.stdout
+        stream.write("Effective thresholds for this project, shown once:\n")
+        stream.write(table + "\n\n")
     tok = Tokenizer(cfg.get("tokenizer", "auto"))
     project = Path(args.project).resolve()
 

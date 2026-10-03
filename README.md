@@ -8,14 +8,16 @@ One rule governs all of it. No cut without a measurement, no claim without a bef
 
 A post in r/ClaudeCode said the model is slow because it re-reads your CLAUDE.md files, and that deleting them fixes it. The symptom is real. The cause and the cure are not.
 
-So the first thing this plugin does is test the claim instead of acting on it. On the machine it was built for, the census over 311 transcripts found this:
+So the first thing this plugin does is test the claim instead of acting on it. On the machine it was built for, the census found this. The run below covered 413 transcripts on 19 September 2026; every number is that run's output, not a figure typed in beside it. The store grows as the machine is used, so re-running the census moves the totals: what should not move is the shape, which is that the reads the post blames are the column that stays near zero.
 
 | Model | Reads of CLAUDE.md or AGENTS.md | Reads of other files under `.claude/` | Total reads |
 |---|---|---|---|
 | Opus 4.8 | 0 | 333 | 582 |
-| Opus 5 | 9 | 70 | 334 |
+| Opus 5 | 9 | 70 | 402 |
+| Haiku 4.5 | 0 | 146 | 207 |
 | Fable 5 | 0 | 76 | 182 |
-| Fable 5.1 | 2 | 45 | 113 |
+| Fable 5.1 | 0 | 2 | 113 |
+| Sonnet 5 | 0 | 4 | 63 |
 
 Instruction files were not being re-read. What did get read under `.claude/` was skill and plugin files, which is a different cost with a different fix. The measured always-on layer came to about 41,000 tokens, of which the global CLAUDE.md was 1,404. The post points at the one item a user can see and ignores the ones they cannot.
 
@@ -23,7 +25,7 @@ The plugin is built so the opposite answer can come back too. If the A/B run say
 
 ## What you get
 
-Four slash commands and a skill.
+Six slash commands and a skill.
 
 | Command | What it does | What it writes |
 |---|---|---|
@@ -150,13 +152,15 @@ Registering a hook is not the same as watching it run. Hooks load when a session
 cat .claude/context-diet/ledger.tsv
 ```
 
-One row means the Stop hook fired. For the rest, run the census over that session's transcript and read its hook columns:
+One row means the Stop hook fired. For the rest, run the census over that session's transcript. `--out` names a directory, and the census writes `census.tsv` and `census-summary.md` into it:
 
 ```bash
-python3 plugins/context-diet/scripts/context_census.py --out census.tsv
+python3 plugins/context-diet/scripts/context_census.py --projects ~/.claude/projects --out .claude/context-diet
 ```
 
-The plugin's own hooks are expected to cost under 200 ms in total for that session. Over that, it fails its own gate.
+The hook columns in that row are grouped by event, not by individual hook, so they show what the whole chain cost on each event rather than what this plugin cost. Isolating one plugin's share needs the `command` field of each hook record, which the census does not yet break out.
+
+What the gate suite bounds is cost **per event**, not per session. On one `PostToolUse` this plugin runs two hooks, and every other event runs one; the gate measures each event's hooks together and fails above 200 ms. The worst is `PreCompact` at about 165 ms, and most of that is interpreter startup: a bare `python3 -c pass` costs 30 to 40 ms here. A per-session total under 200 ms is not a claim this plugin can make and does not try to. Five separate Python processes spend roughly 175 ms starting up before doing any work, and a session with a hundred tool calls pays the monitor a hundred times. Per event is what a user waits for, so per event is what is measured.
 
 ## Known limits
 

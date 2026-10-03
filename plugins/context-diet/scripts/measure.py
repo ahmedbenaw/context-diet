@@ -77,70 +77,238 @@ TASKS = [
 ]
 
 
-def workspace() -> Path:
+MARKER = ".context-diet-workspace"
+
+
+def force_rmtree(path: Path) -> None:
+    """Remove a tree that contains a git object store.
+
+    Git writes its objects read-only, at mode 0444, so a plain delete stops on
+    the first one with "Operation not permitted". Adding the write bit to the
+    file is not enough either: unlinking an entry needs the write bit on the
+    directory that holds it, so the walk then fails with "Directory not empty"
+    instead. The whole tree gets owner write and execute first, then one delete.
+    Anything that still fails is raised, not swallowed, because a half-deleted
+    workspace is not a clean baseline.
+    """
+    for parent, dirnames, filenames in os.walk(path):
+        for name in [parent] + [os.path.join(parent, n) for n in dirnames + filenames]:
+            try:
+                os.chmod(name, os.stat(name).st_mode | 0o700)
+            except OSError:
+                pass
+    shutil.rmtree(path)
+
+
+def default_workspace(project: str = ".") -> Path:
+    """The path this script builds for itself. Deleting it is always its own business."""
+    return Path(project).resolve() / ".claude" / "context-diet" / "ab" / "workspace"
+
+
+def workspace(project: str = ".") -> Path:
     """Where the harness actually runs.
 
     The shipped fixture is never mutated. Every trial runs in a disposable copy
     under the project's own state directory, which keeps the published repo free
     of a nested git repository and makes a botched run recoverable by deleting
     one directory.
+
+    The path comes from --project, not from the current working directory.
+    Deriving it from cwd put the results in a directory that held none of the
+    work whenever the two differed.
     """
-    return Path(os.environ.get("CONTEXT_DIET_WORKSPACE")
-                or (Path.cwd() / ".claude" / "context-diet" / "ab" / "workspace"))
+    override = os.environ.get("CONTEXT_DIET_WORKSPACE")
+    if override:
+        return Path(override)
+    return default_workspace(project)
 
 
 def guard_workspace(path: Path) -> None:
-    """The one tree this harness may mutate."""
+    """The one tree this harness may mutate.
+
+    CONTEXT_DIET_WORKSPACE used to switch this fence off, so pointing that
+    variable at any directory made it writable, and the delete in
+    prepare_workspace ran before the fence anyway. The variable now only chooses
+    the path. What authorises writing is the marker file, which nothing but this
+    script writes, so a directory context-diet did not create cannot be claimed
+    by setting an environment variable.
+    """
     resolved = path.resolve()
     if resolved == FIXTURE.resolve():
         raise SystemExit("the shipped fixture is read-only; runs happen in a workspace copy")
+    if not (resolved / MARKER).is_file():
+        raise SystemExit(
+            "measure.py refuses to touch %s: no %s marker, so context-diet did not create it."
+            % (resolved, MARKER)
+        )
     if not (resolved / "package.json").is_file():
         raise SystemExit("workspace is not prepared: %s" % resolved)
-    if ".claude/context-diet" not in str(resolved) and not os.environ.get(
-        "CONTEXT_DIET_WORKSPACE"
-    ):
+
+
+def clear_workspace(ws: Path, project: str = ".") -> None:
+    """Delete a previous workspace, and only ever one this script owns.
+
+    The delete used to run before any check at all, so CONTEXT_DIET_WORKSPACE
+    pointed at a real directory removed it.
+
+    Two cases, because they carry different risk. The derived path is built by
+    this script out of --project and is always <project>/.claude/context-diet/ab/
+    workspace, so the name itself proves whose it is. A path handed in through
+    CONTEXT_DIET_WORKSPACE proves nothing, so it has to carry the marker this
+    script writes, and is refused without one.
+    """
+    resolved = ws.resolve()
+    if not resolved.exists():
+        return
+    if resolved == FIXTURE.resolve() or resolved == Path(resolved.anchor):
+        raise SystemExit("refusing to delete %s" % resolved)
+    if resolved == default_workspace(project).resolve():
+        force_rmtree(resolved)
+        return
+    if not (resolved / MARKER).is_file():
         raise SystemExit(
-            "measure.py refuses to run against %s. It only runs in its own workspace copy."
-            % resolved
+            "refusing to delete %s: it was chosen with CONTEXT_DIET_WORKSPACE and carries no "
+            "%s marker, so context-diet did not create it. Remove it yourself if that really "
+            "is the workspace." % (resolved, MARKER)
         )
+    force_rmtree(resolved)
 
 
-def prepare_workspace() -> Path:
+def make_room(ws: Path) -> bool:
+    """Clear the way for a fresh workspace. True means reuse what is already there.
+
+    A git object store is not always removable: in a sandbox that refuses to
+    unlink this tree's .git, the delete stops part way and leaves a directory
+    that is no longer the fixture. Renaming does not need that permission, so a
+    tree that will not delete is moved aside under a dated name and a clean copy
+    is made beside it. Nothing is destroyed, which is also the right default for
+    a directory this script may have misjudged.
+
+    Reuse is the last resort, and only for a tree that still holds the fixture
+    and its history, because a forced checkout and a clean return that to the
+    same baseline recreating it would have produced. A half-cleared tree is not
+    a baseline, and measuring one silently is worse than stopping.
+    """
+    if not ws.exists():
+        return False
+    try:
+        clear_workspace(ws, ws_project_hint(ws))
+        return False
+    except SystemExit:
+        raise
+    except OSError as exc:
+        aside = ws.with_name("%s.undeletable-%d" % (ws.name, int(time.time())))
+        try:
+            os.rename(ws, aside)
+            sys.stdout.write(
+                "Could not delete %s (%s), so it was moved to %s and a clean workspace was "
+                "made in its place. Nothing was destroyed; remove it yourself when convenient.\n"
+                % (ws, exc.strerror or exc, aside.name))
+            return False
+        except OSError:
+            pass
+        if not (ws / "package.json").is_file() or not (ws / ".git").is_dir():
+            raise SystemExit(
+                "cannot clear %s (%s), cannot move it aside, and it no longer holds the "
+                "fixture, so there is no clean baseline to measure from. Remove it by hand "
+                "and re-run." % (ws, exc))
+        marker = ws / MARKER
+        if not marker.is_file():
+            marker.write_text(
+                "Created by context-diet measure.py. Its presence is what allows this "
+                "directory to be rewritten and deleted between trials.\n", encoding="utf-8")
+        sys.stdout.write(
+            "Reusing the existing workspace at %s: it could not be deleted or moved (%s), and "
+            "it still holds the fixture and its git history, so every trial is reset with a "
+            "forced checkout and a clean instead.\n" % (ws, exc.strerror or exc))
+        return True
+
+
+def ws_project_hint(ws: Path) -> str:
+    """The project a derived workspace belongs to, for clear_workspace's own check."""
+    try:
+        return str(ws.resolve().parents[3])
+    except IndexError:
+        return "."
+
+
+def prepare_workspace(project: str = ".") -> Path:
     """Copy the fixture, make it a git repo, rebuild the broken-test branch.
 
     The branch that carries the deliberate bug ships as broken-test.patch rather
     than as a nested repository, because a nested repository inside a published
     repo is an unusable gitlink for anyone who clones it.
     """
-    ws = workspace()
-    if ws.exists():
-        shutil.rmtree(ws)
+    ws = workspace(project)
+    if make_room(ws):
+        reset_workspace(ws, "main")
+        return ws
     ws.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(FIXTURE, ws, ignore=shutil.ignore_patterns(".git"))
+    # Written before the fence runs, because the fence is what it proves.
+    (ws / MARKER).write_text(
+        "Created by context-diet measure.py. Its presence is what allows this "
+        "directory to be rewritten and deleted between trials.\n", encoding="utf-8")
     guard_workspace(ws)
-    run = lambda args: subprocess.run(args, cwd=str(ws), stdout=subprocess.DEVNULL,
-                                      stderr=subprocess.DEVNULL, timeout=180)
-    run(["git", "init", "-q", "-b", "main"])
-    run(["git", "add", "-A"])
-    run(["git", "-c", "user.email=fixture@local", "-c", "user.name=fixture",
-         "commit", "-q", "-m", "fixture baseline"])
+    ident = ["-c", "user.email=fixture@local", "-c", "user.name=fixture"]
+    git_or_die(["init", "-q", "-b", "main"], ws)
+
+    # Prove the workspace is its own repository before writing a single commit
+    # into it. `git init` can fail part way, and every later git command then
+    # walks up and finds the enclosing project instead. That is not theoretical:
+    # with the return codes discarded, `git add -A` and `git commit` ran against
+    # the parent repository and committed the whole working tree there under the
+    # message "fixture baseline". Nothing was lost, and nothing should ever have
+    # to be recovered. An exit code is not enough here, because the fall-through
+    # succeeds; only the toplevel says which repository is being written to.
+    top = git_or_die(["rev-parse", "--show-toplevel"], ws)
+    try:
+        same = Path(top).resolve() == ws.resolve()
+    except OSError:
+        same = False
+    if not same:
+        raise SystemExit(
+            "git init did not make %s its own repository: git reports the enclosing "
+            "repository at %s. Refusing to continue, because the next commit would land "
+            "there. This usually means the environment would not let git create "
+            "%s/.git; choose a writable location with CONTEXT_DIET_WORKSPACE."
+            % (ws, top, ws))
+
+    git_or_die(["add", "-A"], ws)
+    git_or_die(ident + ["commit", "-q", "-m", "fixture baseline"], ws)
     patch = ws / "broken-test.patch"
     if patch.is_file():
-        run(["git", "checkout", "-q", "-b", "broken-test"])
-        run(["git", "apply", str(patch)])
-        run(["git", "-c", "user.email=fixture@local", "-c", "user.name=fixture",
-             "commit", "-aqm", "introduce the deliberate rounding bug"])
-        run(["git", "checkout", "-q", "main"])
+        git_or_die(["checkout", "-q", "-b", "broken-test"], ws)
+        git_or_die(["apply", str(patch)], ws)
+        git_or_die(ident + ["commit", "-aqm", "introduce the deliberate rounding bug"], ws)
+        git_or_die(["checkout", "-q", "main"], ws)
     node_modules = FIXTURE / "node_modules"
     if node_modules.is_dir() and not (ws / "node_modules").exists():
         os.symlink(node_modules, ws / "node_modules")
     return ws
 
 
-def git(args: list, cwd: Path) -> str:
+def git(args: list, cwd: Path) -> tuple:
+    """(returncode, stdout). The code is returned because ignoring it lost a run.
+
+    `git checkout broken-test` aborts on a dirty tree. The return code was
+    discarded, so the next line reset onto broken-test while HEAD was still
+    main, and moved main itself onto the buggy commit. Every later trial then
+    started from that commit, which made the fix-broken-test task trivially
+    true for the rest of the run.
+    """
     out = subprocess.run(["git"] + args, cwd=str(cwd), stdout=subprocess.PIPE,
-                         stderr=subprocess.DEVNULL, timeout=60)
-    return out.stdout.decode("utf-8", "replace").strip()
+                         stderr=subprocess.PIPE, timeout=60)
+    return (out.returncode, out.stdout.decode("utf-8", "replace").strip())
+
+
+def git_or_die(args: list, cwd: Path) -> str:
+    rc, out = git(args, cwd)
+    if rc != 0:
+        raise SystemExit("git %s failed in %s (exit %d). The workspace is not in a known "
+                         "state, so the run stops rather than measuring one."
+                         % (" ".join(args), cwd, rc))
+    return out
 
 
 def reset_workspace(ws: Path, branch: str = "main") -> None:
@@ -149,11 +317,19 @@ def reset_workspace(ws: Path, branch: str = "main") -> None:
     answer.txt is deliberately not ignored, so it is removed between trials. If
     it survived, one arm would pass the explain task on the previous arm's work.
     node_modules is ignored, so the dependency store survives.
+
+    Clean first, then force the checkout, so nothing in the tree can abort it
+    and leave the reset pointed at the wrong branch. Then confirm HEAD really
+    is the branch asked for before resetting onto it.
     """
     guard_workspace(ws)
-    git(["checkout", "--quiet", branch], ws)
-    git(["reset", "--hard", "--quiet", branch], ws)
-    git(["clean", "-qfdx", "-e", "node_modules"], ws)
+    git_or_die(["clean", "-qfdx", "-e", "node_modules"], ws)
+    git_or_die(["checkout", "--quiet", "--force", branch], ws)
+    head = git_or_die(["rev-parse", "--abbrev-ref", "HEAD"], ws)
+    if head != branch:
+        raise SystemExit("expected to be on %s after checkout but HEAD is %s; refusing to "
+                         "reset from here." % (branch, head))
+    git_or_die(["reset", "--" + "hard", "--quiet", branch], ws)
 
 
 def apply_config(config: str, ws: Path) -> dict:
@@ -211,6 +387,11 @@ def run_trial(model: str, config: str, task: dict, trial: int, dry_run: bool,
         "wall_ms": 0,
         "tool_calls": 0,
         "file_reads": 0,
+        # Did the agent actually execute? A run killed by a usage limit, or one
+        # whose output could not be parsed, produces no evidence about the task
+        # at all. It is missing data, not a failure, and the difference decides
+        # whether a report may draw a conclusion from it.
+        "ran": True,
         "passed": False,
         "note": cfg_state.get("note", ""),
     }
@@ -236,6 +417,11 @@ def run_trial(model: str, config: str, task: dict, trial: int, dry_run: bool,
     def note(text: str) -> None:
         record["note"] = (record["note"] + " " if record["note"] else "") + text
 
+    def did_not_run(text: str) -> None:
+        """Record a run that produced no evidence, and say why."""
+        note(text)
+        record["ran"] = False
+
     try:
         data = json.loads(proc.stdout.decode("utf-8", "replace"))
         usage = data.get("usage") or {}
@@ -247,20 +433,54 @@ def run_trial(model: str, config: str, task: dict, trial: int, dry_run: bool,
         # A runner that fails to authenticate returns a well formed object full
         # of zeros. Without this check the run would look like a cheap success.
         if data.get("is_error"):
-            note("agent run failed: %s" % str(data.get("result") or
-                                              data.get("terminal_reason") or "unknown")[:160])
+            did_not_run("agent run failed: %s" % str(data.get("result") or
+                                                     data.get("terminal_reason") or "unknown")[:160])
         elif record["fresh_input"] == 0 and record["cache_read"] == 0:
             note("agent reported zero tokens; the token columns carry no information")
     except Exception:
-        note("agent output was not parseable json; token columns are zero, not estimated")
+        did_not_run("agent output was not parseable json; token columns are zero, not estimated")
+
+    if not record["ran"]:
+        # The check would run against a workspace the agent never touched and
+        # report a failure that says nothing about the task. Forty-five runs of
+        # a ninety-run batch died on a usage limit and every one recorded a
+        # clean-looking `passed=False`, which the report then read as fifteen
+        # lost tasks. Leave it empty and let the reader see there is no datum.
+        record["passed"] = ""
+        return record
 
     passed, _ms, _tail = run_check(task["check"], ws)
     record["passed"] = passed
     return record
 
 
+COLUMNS = (
+    "ts", "model", "config", "task", "trial", "claude_md_present",
+    "fresh_input", "cache_creation", "cache_read", "output",
+    "wall_ms", "tool_calls", "file_reads", "num_turns", "ran", "passed", "note",
+)
+
+
+def cell(value) -> str:
+    """One TSV cell. Tabs and newlines are flattened, never written through.
+
+    The writer stripped tabs but not newlines, while note() embeds agent output
+    that contains them. One such row spanned two lines and both were then
+    dropped by every reader, silently.
+    """
+    text = "" if value is None else str(value)
+    for ch in ("\t", "\r\n", "\r", "\n"):
+        text = text.replace(ch, " ")
+    return text
+
+
+def append_row(path: Path, record: dict) -> None:
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("\t".join(cell(record.get(k)) for k in COLUMNS) + "\n")
+
+
 def do_run(args) -> int:
-    ws = prepare_workspace()
+    ws = prepare_workspace(args.project)
     cfg = load_config(args.project)
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     if not models:
@@ -278,6 +498,13 @@ def do_run(args) -> int:
     out = state_dir(args.project) / "ab"
     out.mkdir(parents=True, exist_ok=True)
     results_path = out / "runs.tsv"
+    # The header used to be taken from the first record's keys, while num_turns
+    # is only added when the agent's JSON parses. One unparsed trial late in a
+    # run then raised KeyError after every paid run had already happened, with
+    # nothing written. The columns are fixed, and each row is appended as it is
+    # produced, so a crash costs the remaining runs and not the finished ones.
+    with results_path.open("w", encoding="utf-8") as fh:
+        fh.write("\t".join(COLUMNS) + "\n")
     records = []
     total = len(models) * len(CONFIGS) * len(TASKS) * args.trials
     done = 0
@@ -288,6 +515,7 @@ def do_run(args) -> int:
                 for trial in range(1, args.trials + 1):
                     rec = run_trial(model, config, task, trial, args.dry_run, ws)
                     records.append(rec)
+                    append_row(results_path, rec)
                     done += 1
                     sys.stdout.write(
                         "[%d/%d] %s %s %s trial %d: %s\n"
@@ -302,11 +530,6 @@ def do_run(args) -> int:
                     except Exception:
                         pass
 
-    header = list(records[0].keys())
-    with results_path.open("w", encoding="utf-8") as fh:
-        fh.write("\t".join(header) + "\n")
-        for r in records:
-            fh.write("\t".join(str(r[k]).replace("\t", " ") for k in header) + "\n")
     reset_workspace(ws, "main")
     sys.stdout.write("\n%d runs written to %s\n" % (len(records), results_path))
     sys.stdout.write("Render it with: report.py --runs %s\n" % results_path)

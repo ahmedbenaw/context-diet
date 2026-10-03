@@ -4,8 +4,10 @@ Five tasks for the A/B measurement harness. Each one is stated as the
 instruction to hand to the agent, followed by the exact shell command the
 harness runs to decide pass or fail.
 
-Every pass command is run from the fixture root with `bash`, and every one ends
-in `echo "exit=$?"`. **Pass is `exit=0`.**
+Every pass command is run from the fixture root with `bash`, and the command's
+own exit status decides the result. **Pass is exit status 0.** The commands do
+not end in `echo "exit=$?"`, and they must not: `echo` succeeds whatever it is
+printing, so appending it would make every task pass unconditionally.
 
 Between tasks, reset the working tree to the branch tip: restore tracked files
 and remove untracked ones, including `answer.txt`, which Task 3 creates and
@@ -35,7 +37,7 @@ updating the call sites would otherwise pass silently.
 grep -q "currency" src/models/order.ts \
   && grep -rq "currency" tests \
   && npm run typecheck \
-  && npm test; echo "exit=$?"
+  && npm test
 ```
 
 ---
@@ -53,7 +55,7 @@ diff check is what enforces "without editing the assertion", and it also
 catches deleting the test or marking it `.skip`.
 
 ```bash
-git diff --quiet main -- tests/ && npm test; echo "exit=$?"
+git diff --quiet main -- tests/ && npm test
 ```
 
 ---
@@ -71,10 +73,7 @@ exports. The expected names are derived from the file at check time rather
 than hardcoded, so the check survives Task 4's rename.
 
 ```bash
-ANSWER=answer.txt; [ "$(grep -oE 'export function [A-Za-z0-9_]+' \
-  src/services/pricing.ts | awk '{print $3}' \
-  | while read -r f; do grep -q "$f" "$ANSWER" && echo "$f"; done \
-  | wc -l | tr -d ' ')" -ge 3 ]; echo "exit=$?"
+[ "$(grep -oE 'export function [A-Za-z0-9_]+' src/services/pricing.ts | awk '{print $3}' | while read -r f; do grep -q "$f" answer.txt && echo x; done | wc -l | tr -d ' ')" -ge 3 ]
 ```
 
 ---
@@ -99,7 +98,7 @@ and in `CLAUDE.md` cannot affect the count.
 ```bash
 ! grep -rq "makeIdKey" src tests \
   && [ "$(grep -rl "buildIdKey" src tests | wc -l | tr -d ' ')" -ge 4 ] \
-  && npm run typecheck; echo "exit=$?"
+  && npm run typecheck
 ```
 
 ---
@@ -115,5 +114,5 @@ and in `CLAUDE.md` cannot affect the count.
 `{}` for a missing key, which is what the first half tests.
 
 ```bash
-[ "$(npm pkg get scripts.smoke)" != "{}" ] && npm run smoke; echo "exit=$?"
+[ "$(npm pkg get scripts.smoke)" != "{}" ] && npm run smoke
 ```

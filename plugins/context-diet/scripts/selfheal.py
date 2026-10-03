@@ -24,7 +24,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cdlib import append_decision, disable_hook, load_config, state_dir  # noqa: E402
+from cdlib import (  # noqa: E402
+    PLUGIN_ROOT,
+    append_decision,
+    disable_hook,
+    load_config,
+    state_dir,
+)
 
 # scorer -> (what happens, how it is undone)
 TABLE = {
@@ -36,7 +42,18 @@ TABLE = {
         "Drop the failing field, log which one, re-verify the rest.",
         "The transcript on disk still holds the detail.",
     ),
-    "hook_latency_budget": (
+    # There is no gate called hook_latency_budget. Naming it here meant
+    # `--only hook_latency_budget` reported 0 passed and exited 0, which reads
+    # as success. The three gates that actually bound hook cost are named below.
+    "monitor_budget_ms": (
+        "Write the per-hook file flag for this session and report the measured milliseconds.",
+        "The flag is session scoped, so the hook is enabled again next session.",
+    ),
+    "session_start_budget_ms": (
+        "Write the per-hook file flag for this session and report the measured milliseconds.",
+        "The flag is session scoped, so the hook is enabled again next session.",
+    ),
+    "stop_hook_timing_bound": (
         "Write the per-hook file flag for this session and report the measured milliseconds.",
         "The flag is session scoped, so the hook is enabled again next session.",
     ),
@@ -117,12 +134,31 @@ def heal_ledger(args, cfg) -> tuple:
 ACTIONS = {
     "unknown_model_idle": heal_unknown_model,
     "manifest_roundtrip": heal_manifest,
-    "hook_latency_budget": heal_hook_latency,
+    # One handler, three real gates. The old single key named a gate that does
+    # not exist, so the action it describes could never actually be reached.
+    "monitor_budget_ms": heal_hook_latency,
+    "session_start_budget_ms": heal_hook_latency,
+    "stop_hook_timing_bound": heal_hook_latency,
     "apply_revert_identity": heal_restore_backup,
     "no_source_edit": heal_restore_backup,
     "storage_signal_cost": heal_storage_cache,
     "ledger_rotation": heal_ledger,
 }
+
+
+def known_gates() -> set:
+    """Every gate name the suite defines, read from the suite itself.
+
+    Reading the real file rather than keeping a second list is the point: a
+    copy would drift, which is the failure this is here to catch.
+    """
+    import re  # noqa: PLC0415
+
+    path = PLUGIN_ROOT / "tests" / "run_gates.py"
+    try:
+        return set(re.findall(r'@gate\("([a-z0-9_]+)"\)', path.read_text(encoding="utf-8")))
+    except OSError:
+        return set()
 
 
 def main() -> int:
@@ -146,6 +182,15 @@ def main() -> int:
         return 0
 
     if args.scorer not in ACTIONS:
+        # Two different answers were being given as one. A real gate with no
+        # automatic action is the design working; a name that is not a gate at
+        # all is a typo or a stale reference, and saying "proposal for a human"
+        # about it reads like success. That is how `hook_latency_budget`, which
+        # was never a gate, sat in this table unnoticed.
+        if args.scorer not in known_gates():
+            sys.stderr.write(
+                "%s is not a gate name. Run `run_gates.py --list` to see them.\n" % args.scorer)
+            return 2
         sys.stderr.write(
             "no automatic action for %s. It is a proposal for a human, by design.\n" % args.scorer
         )
