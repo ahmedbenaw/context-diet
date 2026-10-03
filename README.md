@@ -40,7 +40,7 @@ And five hooks that run on their own, from the start of a session and throughout
 
 | Hook | When | What it does |
 |---|---|---|
-| Occupancy monitor | After each tool call, and on each prompt | At 50% of the window it saves your state and asks the model to compact. At 70% it arms a handoff. Below that it says nothing at all. |
+| Occupancy monitor | After each tool call, and on each prompt | At 50% of the window it saves your place and says so once. At 70% it arms a handoff. A turn that re-writes the cache instead of reading it is reported once, at any size. It never asks for a compaction. Below every threshold it says nothing at all. |
 | Session start | New session | Loads an armed handoff once, or says one line if the last session crossed a threshold, or stays quiet |
 | Pre-compact | Before the built-in compactor runs | Saves state if nothing saved it yet |
 | Stop ledger | End of session | Appends one row of totals. Checks storage sizes once a day. Injects nothing. |
@@ -85,13 +85,13 @@ The honest substitute ships instead. Nothing here pretends to be the original.
 
 | Asked for | Reality | What ships |
 |---|---|---|
-| A hook runs compaction automatically | No hook can invoke it | The hook saves state and asks; the model compacts |
+| A hook runs compaction automatically | No hook can invoke it, and asking for extra compactions costs more than it saves | The hook saves your place and leaves compaction to Claude Code's own trigger |
 | A hook opens a new session in the same window | No hook can drive the client | The handoff is written and armed; you start the session and it loads in one line |
 | Compaction with zero loss | Compaction replaces turns with a summary, so it is lossy by definition | State is on disk before compaction. No state is lost. Transcript detail leaves the window but stays on disk and is named in the manifest. |
 
 ## The handoff
 
-At 50% the monitor writes a file of checkable pointers, verifies it against disk, and only then asks for compaction. Manifest first, always: compacting first means summarising from a window you already damaged.
+At 50% the monitor writes a file of checkable pointers, verifies it against disk, and only then says one line. It does not ask for a compaction: measured across 413 sessions here, the turn after a compaction writes a median 90,337 tokens to the cache and reads 34,068, where an ordinary turn of that size writes 1,371 and reads 284,209. Writing the cache is billed well above reading it, so an extra compaction costs more than it saves. If Claude Code's own compactor fires first, the pre-compact hook writes the same file. The file's one line of free text, the next step, is copied from the task in progress or your last request, never written fresh.
 
 Every field is something that can be checked. A commit that must resolve. A path that must stat. A checksum that must match. Prose is prohibited, because prose is where a model smooths over a gap it cannot recall. A field that fails verification is dropped and named. It is never repaired, because a plausible replacement is the exact failure the format exists to prevent.
 
@@ -112,7 +112,7 @@ python3 plugins/context-diet/tests/make_fixtures.py --heavy
 python3 plugins/context-diet/tests/run_gates.py
 ```
 
-Thirty-three checks, each one a command rather than an opinion. They cover the census, the monitor's silence below threshold, its 50 ms budget, the unknown-model pause, the manifest round trip, apply and revert being byte-identical, the refusal to write outside the instruction layer, storage signals deleting nothing, and the report refusing to state a difference smaller than its own spread.
+Fifty-nine checks, each one a command rather than an opinion (`run_gates.py --list` names them). They cover the census, the monitor's silence below threshold, its 50 ms budget, the unknown-model pause, the manifest round trip, apply and revert being byte-identical, the refusal to write outside the instruction layer, storage signals deleting nothing, the hook audit seeing only hooks that load, and the report refusing to state a difference smaller than its own spread.
 
 ## Running the A/B yourself
 
@@ -158,9 +158,9 @@ One row means the Stop hook fired. For the rest, run the census over that sessio
 python3 plugins/context-diet/scripts/context_census.py --projects ~/.claude/projects --out .claude/context-diet
 ```
 
-The hook columns in that row are grouped by event, not by individual hook, so they show what the whole chain cost on each event rather than what this plugin cost. Isolating one plugin's share needs the `command` field of each hook record, which the census does not yet break out.
+Hook time in that row is charged to the model whose turn it fell in, and `h3_hook_ms_top_hook` names the costliest hook by its command, so this plugin's share is visible next to every other hook's. Injected bytes (`h4_*`) stay grouped by event, because the record of an injection names the event and nothing else.
 
-What the gate suite bounds is cost **per event**, not per session. On one `PostToolUse` this plugin runs two hooks, and every other event runs one; the gate measures each event's hooks together and fails above 200 ms. The worst is `PreCompact` at about 165 ms, and most of that is interpreter startup: a bare `python3 -c pass` costs 30 to 40 ms here. A per-session total under 200 ms is not a claim this plugin can make and does not try to. Five separate Python processes spend roughly 175 ms starting up before doing any work, and a session with a hundred tool calls pays the monitor a hundred times. Per event is what a user waits for, so per event is what is measured.
+What the gate suite bounds is cost **per event**, not per session. On one `PostToolUse` this plugin runs two hooks, and every other event runs one; the gate times each hook three times, keeps the fastest, sums each event's hooks and fails above 200 ms. The worst is `PreCompact` at about 75 ms, and most of that is interpreter startup: a bare `python3 -c pass` costs 30 to 40 ms here. A per-session total under 200 ms is not a claim this plugin can make and does not try to. Five separate Python processes spend roughly 175 ms starting up before doing any work, and a session with a hundred tool calls pays the monitor a hundred times. Per event is what a user waits for, so per event is what is measured.
 
 ## Known limits
 
