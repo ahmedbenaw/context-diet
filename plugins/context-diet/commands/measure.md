@@ -5,6 +5,7 @@ description: Run the A/B harness against the committed fixture and report before
 This is the part that makes the original claim testable.
 
 1. Check the fixture is intact: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/measure.py" tasks`
+   MLflow is required. If `measure.py run` exits 2 saying it is not installed, give the user the install command it printed and stop. Do not run without it.
 2. Run it: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/measure.py" run --models claude-opus-5,claude-fable-5-1 --trials 3 --project .`
    That is 45 runs per model. Tell the user the cost before starting, and run the two primary models first. Other models are a separate opt-in batch.
 3. Render it: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/report.py" --runs .claude/context-diet/ab/runs.tsv --project .`

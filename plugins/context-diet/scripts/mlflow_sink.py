@@ -491,14 +491,39 @@ def log_census(tsv_path: str, cfg: dict | None = None, project: str = ".") -> di
     return {"available": True, "runs": runs}
 
 
+INSTALL = ("python3 -m pip install --user 'mlflow[mcp]>=3.5.1'   "
+           "(or: scripts/mlflow_bootstrap.sh --install for a project .venv)")
+
+
+class MLflowMissing(RuntimeError):
+    """MLflow is required (Ben, 4 Oct 2026) and no interpreter here can import it."""
+
+
+def require_python(project: str = ".") -> str:
+    """The interpreter that has MLflow, or MLflowMissing carrying the install line.
+
+    Every command that logs calls this before it does work, so a machine without
+    MLflow is told at once instead of measuring for an hour and logging nothing.
+    The hooks never call it: they queue rows and stay stdlib-only.
+    """
+    from cdlib import mlflow_python  # noqa: PLC0415
+
+    python = mlflow_python(project)
+    if python is None:
+        raise MLflowMissing("MLflow is required and no interpreter here can import it "
+                            "(tried CONTEXT_DIET_PYTHON, python3, the project .venv). "
+                            "Install it with: %s" % INSTALL)
+    return python
+
+
 def delegate(command: str, payload, project: str = ".", timeout: int = 600,
              env: dict | None = None) -> dict:
     """Run one sink command where MLflow can be imported, and return its JSON reply.
 
-    The scripts that call this run under python3, which has no MLflow. They hand
-    the payload to this module under the interpreter cdlib.mlflow_python finds
-    (the project's .venv on this machine). Never called from a hook: importing
-    MLflow takes seconds.
+    The scripts that call this stay stdlib-only and hand the payload to this
+    module under the interpreter cdlib.mlflow_python finds (python3 on this
+    machine since 4 Oct, the project .venv as fallback). Never called from a
+    hook: importing MLflow takes seconds.
     """
     import subprocess  # noqa: PLC0415
 

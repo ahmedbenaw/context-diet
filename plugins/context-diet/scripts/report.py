@@ -262,8 +262,8 @@ def render(rows: list, cfg: dict, markdown: bool) -> str:
 def cross_check(rows: list, cfg: dict, project: str = ".") -> str:
     """The ledger is the source. MLflow is compared to it trial by trial.
 
-    report.py runs under python3, which has no MLflow on this machine, so the
-    comparison runs in mlflow_sink under the interpreter that has it.
+    report.py stays stdlib-only, so the comparison runs in mlflow_sink under the
+    interpreter that has MLflow.
     """
     try:
         from mlflow_sink import delegate  # noqa: PLC0415
@@ -303,16 +303,20 @@ def main() -> int:
             "harness wrote for itself, for all %d row(s). Re-running the batch with the current "
             "measure.py records it outright.\n\n" % (path.name, derived))
     sys.stdout.write(render(rows, cfg, args.markdown) + "\n")
+    # MLflow is required: the report above still prints from the ledger, then a
+    # missing install ends the command with the install line and exit 1.
+    from mlflow_sink import MLflowMissing, delegate, require_python  # noqa: PLC0415
+
+    try:
+        require_python(args.project)
+    except MLflowMissing as exc:
+        sys.stderr.write("%s\n" % exc)
+        return 1
     # Drain the Stop hook's queued session rows first. The hook cannot import
     # MLflow itself, so the command layer is where the queue is emptied.
-    try:
-        from mlflow_sink import delegate  # noqa: PLC0415
-
-        drained = delegate("drain", None, args.project).get("drained", 0)
-        if drained:
-            sys.stdout.write("logged %d queued session row(s) to MLflow\n" % drained)
-    except Exception:
-        pass
+    drained = delegate("drain", None, args.project).get("drained", 0)
+    if drained:
+        sys.stdout.write("logged %d queued session row(s) to MLflow\n" % drained)
     sys.stdout.write(cross_check(rows, cfg, args.project) + "\n")
     return 0
 

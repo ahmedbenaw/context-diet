@@ -91,11 +91,11 @@ if [ "$STATUS" = "ok" ] && ! mlflow_found; then
         && mlflow_found; then
       say "mlflow installed into ${REPO}/.venv"
     else
-      say "the install did not leave an importable mlflow; scorers still run as plain checks"
+      say "the install did not leave an importable mlflow; it is required, so measure, report, census and the gates will stop"
       STATUS="unavailable"
     fi
   else
-    say "mlflow >= 3.5.1 not importable by python3 or ${REPO}/.venv; scorers still run as plain checks"
+    say "mlflow >= 3.5.1 not importable by python3 or ${REPO}/.venv; it is required, so measure, report, census and the gates will stop"
     say "install it into this repo's .venv with: $0 --install ${REPO}"
     STATUS="unavailable"
   fi

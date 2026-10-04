@@ -512,6 +512,17 @@ def carried_rows(ledger: Path) -> dict:
 
 
 def do_run(args) -> int:
+    # MLflow is required. Check before the workspace is touched or any paid run
+    # starts, not after forty-five runs have been bought and none logged. A dry
+    # run measures nothing and logs nothing, so it does not need MLflow.
+    if not args.dry_run:
+        from mlflow_sink import MLflowMissing, require_python  # noqa: PLC0415
+
+        try:
+            require_python(args.project)
+        except MLflowMissing as exc:
+            sys.stderr.write("%s\n" % exc)
+            return 2
     ws = prepare_workspace(args.project)
     cfg = load_config(args.project)
     models = [m.strip() for m in args.models.split(",") if m.strip()]
@@ -581,12 +592,13 @@ def do_run(args) -> int:
                     # "probe" runs in the 19 Sep store were dry runs.
                     if args.dry_run:
                         continue
-                    try:
-                        from mlflow_sink import delegate  # noqa: PLC0415
+                    from mlflow_sink import delegate  # noqa: PLC0415
 
-                        delegate("log-ab", {"records": [rec], "batch": batch}, args.project)
-                    except Exception:
-                        pass
+                    reply = delegate("log-ab", {"records": [rec], "batch": batch}, args.project)
+                    if not reply.get("available"):
+                        sys.stderr.write("  MLflow did not log this run (%s); it is in %s\n"
+                                         % (reply.get("error") or "unavailable",
+                                            results_path.name))
 
     reset_workspace(ws, "main")
     sys.stdout.write("\n%d runs written to %s\n" % (len(records), results_path))

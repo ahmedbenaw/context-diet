@@ -67,15 +67,34 @@ def check_tokenizer(fetch: bool) -> dict:
                    "check network access to the tokeniser host, then retry")
 
 
-def check_mlflow() -> dict:
-    try:
-        import mlflow  # noqa: PLC0415
+# MLflow is the one required extra (Ben, 4 Oct 2026). Everything else degrades
+# one feature and names which one.
+REQUIRED = {"mlflow"}
 
-        return row("mlflow", "present", "version %s" % mlflow.__version__)
-    except Exception:
+
+def check_mlflow(project: Path) -> dict:
+    """Asks the interpreter the scripts actually hand MLflow work to.
+
+    Importing MLflow here would test only this python3, and send telemetry on
+    import; the subprocess gets the same switches the sink sets.
+    """
+    from cdlib import mlflow_python  # noqa: PLC0415
+    from mlflow_sink import INSTALL  # noqa: PLC0415
+
+    python = mlflow_python(str(project))
+    if python is None:
         return row("mlflow", "missing",
-                   "scorers still run as plain checks and write to the ledger",
-                   "pip install 'mlflow[mcp]>=3.5.1'")
+                   "required: measure, report, census and the full gate run stop without it",
+                   INSTALL)
+    env = dict(os.environ, MLFLOW_DISABLE_TELEMETRY="true", DO_NOT_TRACK="true",
+               MLFLOW_DISABLE_AGENT_HINT="1")
+    try:
+        version = subprocess.run([python, "-c", "import mlflow;print(mlflow.__version__)"],
+                                 capture_output=True, text=True, timeout=120,
+                                 env=env).stdout.strip().splitlines()[-1]
+    except (OSError, subprocess.SubprocessError, IndexError):
+        version = "unknown"
+    return row("mlflow", "present", "version %s (%s)" % (version, Path(python).name))
 
 
 def check_mcp_json(project: Path, cfg: dict, write: bool) -> dict:
@@ -136,17 +155,18 @@ def main() -> int:
     rows = [
         check_uv(),
         check_tokenizer(args.fetch_tokenizer),
-        check_mlflow(),
+        check_mlflow(project),
         check_mcp_json(project, cfg, write=False),
         check_config(project, cfg),
         check_state(project),
         check_git(),
     ]
 
+    required_missing = [r for r in rows if r["name"] in REQUIRED and r["status"] == "missing"]
     if args.json:
         sys.stdout.write(json.dumps({"project": str(project), "plugin": str(PLUGIN_ROOT),
                                      "checks": rows, "effective_config": cfg}, indent=2) + "\n")
-        return 0
+        return 1 if required_missing else 0
 
     sys.stdout.write("context-diet preflight  (project: %s)\n\n" % project)
     sys.stdout.write("%-12s %-9s %s\n" % ("dependency", "status", "detail"))
@@ -160,8 +180,13 @@ def main() -> int:
         for r in fixes:
             sys.stdout.write("  %-12s %s\n" % (r["name"], r["fix"]))
         sys.stdout.write("\n")
-    sys.stdout.write("Nothing here is required. Every missing item degrades one feature and names "
-                     "which one.\n")
+    if required_missing:
+        sys.stdout.write("Required and missing: %s. Install it before running /measure, the "
+                         "report, the census or the gates.\n"
+                         % ", ".join(r["name"] for r in required_missing))
+        return 1
+    sys.stdout.write("MLflow is required and present. Every other missing item degrades one "
+                     "feature and names which one.\n")
     return 0
 
 

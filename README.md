@@ -70,14 +70,21 @@ Then in Claude Code:
 
 Enabling it at user level is what makes the hooks run in every session.
 
-Optional extras, neither required:
+MLflow is required. Install it for the `python3` the plugin runs:
+
+```bash
+python3 -m pip install --user 'mlflow[mcp]>=3.5.1'
+```
+
+or, to keep it in a project venv instead, `plugins/context-diet/scripts/mlflow_bootstrap.sh --install`. It records every A/B trial, every session row, every census and every full gate run in one local SQLite file, `.claude/context-diet/mlflow.db`, with telemetry off. `/context-diet:measure`, `report.py`, the census and a full gate run stop with the install line when it is missing, and `preflight.py` exits non-zero until it is installed. The hooks never import it: the Stop hook queues its row in `mlflow-pending.jsonl` and `report.py` logs the queue, because importing MLflow inside a hook would break the hooks' time budget.
+
+One optional extra:
 
 ```bash
 python3 plugins/context-diet/scripts/preflight.py --fetch-tokenizer   # real token counts, one network call, then offline
-pip install 'mlflow[mcp]>=3.5.1'                                      # logs every check as a tracked run
 ```
 
-Without `tiktoken` the counts fall back to characters divided by four, and every report says so. Without MLflow every check still runs and writes to the ledger.
+Without `tiktoken` the counts fall back to characters divided by four, and every report says so.
 
 ## Three things that were asked for and do not exist
 

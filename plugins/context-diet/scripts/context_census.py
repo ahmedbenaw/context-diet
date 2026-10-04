@@ -599,15 +599,22 @@ def main() -> int:
     )
     # One MLflow run per model, one metric per H column (plan Part 7.5). Runs
     # under the interpreter that has MLflow; the census itself stays stdlib.
-    try:
-        from mlflow_sink import delegate  # noqa: PLC0415
+    # MLflow is required; the TSV and summary above are already on disk.
+    from mlflow_sink import MLflowMissing, delegate, require_python  # noqa: PLC0415
 
-        logged = delegate("log-census", str(tsv.resolve()), args.project)
-        if logged.get("runs"):
-            sys.stdout.write("logged the census to MLflow: %d run(s), one per model\n"
-                             % logged["runs"])
-    except Exception:
-        pass
+    try:
+        require_python(args.project)
+    except MLflowMissing as exc:
+        sys.stderr.write("%s\n" % exc)
+        return 1
+    logged = delegate("log-census", str(tsv.resolve()), args.project)
+    if logged.get("runs"):
+        sys.stdout.write("logged the census to MLflow: %d run(s), one per model\n"
+                         % logged["runs"])
+    elif not logged.get("available"):
+        sys.stderr.write("MLflow did not log the census (%s)\n"
+                         % (logged.get("error") or "unavailable"))
+        return 1
     return 0
 
 

@@ -1082,6 +1082,48 @@ def g_timing_precondition():
             % (code_hi, blocked, not_passed, ran))
 
 
+@gate("mlflow_missing_stops_every_logging_command")
+def g_mlflow_missing_stops():
+    """MLflow is required: without it, measure, report, census and preflight stop.
+
+    PYTHONNOUSERSITE hides the user-site install from every interpreter the
+    resolver probes, and the temp project has no .venv, so nothing can import
+    MLflow. measure.py must stop before it touches the fixture workspace.
+    """
+    project = temp_project("nomlflow")
+    env = {k: v for k, v in os.environ.items() if k != "CONTEXT_DIET_PYTHON"}
+    env["PYTHONNOUSERSITE"] = "1"
+    probe = subprocess.run([PY, "-c", "import importlib.util,sys;"
+                            "sys.exit(importlib.util.find_spec('mlflow') is not None)"],
+                           env=env, timeout=30)
+    if probe.returncode != 0:
+        return (None, "MLflow is importable without the user site here; cannot hide it")
+    ledger = _write_ledger(project / "runs.tsv", [_ab_row(1, "claude-opus-5", "Fat")])
+
+    def run(*argv):
+        r = subprocess.run([PY, *[str(a) for a in argv]], stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, env=env, timeout=300)
+        return r.returncode, r.stdout.decode("utf-8", "replace")
+
+    before = sorted(str(p) for p in project.rglob("*"))
+    env.pop("CONTEXT_DIET_WORKSPACE", None)
+    results = {
+        "measure": run(SCRIPTS / "measure.py", "run", "--models", "claude-opus-5",
+                       "--trials", "1", "--project", project),
+        "_": (0, "") if sorted(str(p) for p in project.rglob("*")) == before else (1, "changed"),
+        "report": run(SCRIPTS / "report.py", "--runs", ledger, "--project", project),
+        "census": run(SCRIPTS / "context_census.py", "--projects", FIXTURES / "transcripts",
+                      "--out", project / "census-out", "--project", project),
+        "preflight": run(SCRIPTS / "preflight.py", "--json", "--project", project),
+    }
+    untouched = results.pop("_")[0] == 0
+    bad = [name for name, (code, out) in results.items()
+           if code == 0 or ("mlflow[mcp]" not in out and name != "preflight")]
+    return (not bad and untouched,
+            "without MLflow: %s; measure created no file=%s"
+            % (", ".join("%s exit %d" % (n, c) for n, (c, _o) in results.items()), untouched))
+
+
 @gate("no_listening_socket")
 def g_no_server():
     """The plugin starts no server. MLflow writes to a local file store."""
@@ -2394,7 +2436,9 @@ def main() -> int:
         if scored:
             sys.stdout.write(scored + "\n")
     # Blocked is not a pass: a timing limit that was never measured fails the run.
-    return 1 if any(r["status"] in ("FAIL", "blocked") for r in results) else 0
+    # MLflow is required, so a full run whose scores were not logged fails too.
+    unlogged = bool(scored) and "NOT logged" in scored
+    return 1 if unlogged or any(r["status"] in ("FAIL", "blocked") for r in results) else 0
 
 
 if __name__ == "__main__":
