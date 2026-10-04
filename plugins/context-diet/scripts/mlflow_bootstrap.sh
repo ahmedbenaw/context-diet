@@ -103,10 +103,24 @@ fi
 
 mkdir -p "$STORE_DIR"
 
+# How the MCP server is launched. `uv run --with mlflow[mcp]` builds its
+# environment on every start: measured 20-32 s on 4 Oct, past the client's
+# connect timeout, so the server never came up. When python3 already imports
+# MLflow it answers in 6-13 s under the same load, so that form is preferred;
+# uv stays the self-contained fallback for a machine where python3 lacks it.
+if has_mlflow python3; then
+  MCP_LAUNCH='{"command": "python3", "args": ["-m", "mlflow", "mcp", "run"]}'
+  PROMOTE_CMD="python3 -m mlflow mcp run"
+else
+  MCP_LAUNCH='{"command": "uv", "args": ["run", "--with", "mlflow[mcp]>=3.5.1", "mlflow", "mcp", "run"]}'
+  PROMOTE_CMD='uv run --with "mlflow[mcp]>=3.5.1" mlflow mcp run'
+fi
+
 # Reconcile on content, not on presence. Checking only that the key existed left
 # a stale tracking URI in place forever, so the MCP server read an empty store
 # while every script logged to a different one.
 CURRENT_URI=""
+CURRENT_LAUNCH=""
 if [ -f "$MCP_JSON" ]; then
   CURRENT_URI="$(python3 -c 'import json,sys,pathlib
 try:
@@ -115,15 +129,31 @@ except Exception:
     print(""); raise SystemExit
 s = (d.get("mcpServers") or {}).get("mlflow-mcp") or {}
 print((s.get("env") or {}).get("MLFLOW_TRACKING_URI") or "")' "$MCP_JSON" 2>/dev/null || true)"
+  CURRENT_LAUNCH="$(python3 -c 'import json,sys,pathlib
+try:
+    d = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    print(""); raise SystemExit
+s = (d.get("mcpServers") or {}).get("mlflow-mcp") or {}
+print(json.dumps({"command": s.get("command"), "args": s.get("args")}, sort_keys=True))' "$MCP_JSON" 2>/dev/null || true)"
 fi
+WANT_LAUNCH="$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]), sort_keys=True))' "$MCP_LAUNCH")"
 
-if [ -n "$CURRENT_URI" ] && [ "$(resolve_uri "$CURRENT_URI")" = "$TRACKING_URI" ]; then
-  say "mlflow-mcp already registered with this tracking URI (project scope)"
+if [ -n "$CURRENT_URI" ] && [ "$(resolve_uri "$CURRENT_URI")" = "$TRACKING_URI" ] \
+    && [ "$CURRENT_LAUNCH" = "$WANT_LAUNCH" ]; then
+  say "mlflow-mcp already registered with this tracking URI and launch command (project scope)"
 else
-  if python3 - "$MCP_JSON" "$PROJECT_URI" <<'PY'
+  # Keep an existing URI spelling that resolves to the right store: relative in
+  # a committed .mcp.json is deliberate (no home path in a public repo).
+  WRITE_URI="$PROJECT_URI"
+  if [ -n "$CURRENT_URI" ] && [ "$(resolve_uri "$CURRENT_URI")" = "$TRACKING_URI" ]; then
+    WRITE_URI="$CURRENT_URI"
+  fi
+  if python3 - "$MCP_JSON" "$WRITE_URI" "$MCP_LAUNCH" <<'PY'
 import json, sys, pathlib
 target = pathlib.Path(sys.argv[1])
 uri = sys.argv[2]
+launch = json.loads(sys.argv[3])
 data = {}
 if target.is_file():
     try:
@@ -132,8 +162,8 @@ if target.is_file():
         data = {}
 servers = data.setdefault("mcpServers", {})
 servers["mlflow-mcp"] = {
-    "command": "uv",
-    "args": ["run", "--with", "mlflow[mcp]>=3.5.1", "mlflow", "mcp", "run"],
+    "command": launch["command"],
+    "args": launch["args"],
     "env": {"MLFLOW_TRACKING_URI": uri},
 }
 # An unwritable .mcp.json is an ordinary outcome, not a crash: it is a
@@ -158,7 +188,7 @@ fi
 say "tracking ${TRACKING_URI} · status ${STATUS}"
 cat <<EOF
 context-diet bootstrap: to promote this server to every session on the machine, run
-  claude mcp add mlflow-mcp -e MLFLOW_TRACKING_URI=${TRACKING_URI} -- uv run --with "mlflow[mcp]>=3.5.1" mlflow mcp run
+  claude mcp add mlflow-mcp -e MLFLOW_TRACKING_URI=${TRACKING_URI} -- ${PROMOTE_CMD}
 Check its schema cost in /context-diet:budget first. A user-scope server pays its
 schema cost on every turn of every session.
 EOF

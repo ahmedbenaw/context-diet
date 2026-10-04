@@ -1013,9 +1013,73 @@ def g_bootstrap_uri_spelling():
         if spelling == "fresh":
             ok = bool(after) and str(project).encode() not in after
         else:
-            ok = after == before
+            # The launch command may be corrected (the fixture's is a dummy);
+            # the URI spelling must survive exactly as written.
+            try:
+                kept = json.loads(after)["mcpServers"]["mlflow-mcp"]["env"]["MLFLOW_TRACKING_URI"]
+            except (ValueError, KeyError, TypeError):
+                kept = None
+            ok = kept == uri and (spelling != "relative" or str(project).encode() not in after)
         results.append((spelling, ok))
     return (all(ok for _s, ok in results), "kept or wrote portably: %s" % results)
+
+
+@gate("bootstrap_mcp_launch_is_fast_when_python3_has_mlflow")
+def g_bootstrap_launch():
+    """The MCP entry starts from python3 when it imports MLflow, from uv otherwise.
+
+    `uv run --with mlflow[mcp]` rebuilt its environment on every start: 20 to
+    32 s on 4 Oct, past the client's connect timeout, so the server never came
+    up. python3 answered in 6 to 13 s under the same load. A stale uv entry in
+    an existing .mcp.json is upgraded, with its URI spelling kept.
+    """
+    script = SCRIPTS / "mlflow_bootstrap.sh"
+    env = {k: v for k, v in os.environ.items() if k != "MLFLOW_TRACKING_URI"}
+    has = subprocess.run(["python3", "-c", "import importlib.util,sys;"
+                          "sys.exit(importlib.util.find_spec('mlflow') is None)"],
+                         timeout=30).returncode == 0
+    want = "python3" if has else "uv"
+    project = Path(tempfile.mkdtemp(prefix="cd-launch-")).resolve()
+    mcp = project / ".mcp.json"
+    mcp.write_text(json.dumps({"mcpServers": {"mlflow-mcp": {
+        "command": "uv", "args": ["run", "--with", "mlflow[mcp]>=3.5.1", "mlflow", "mcp", "run"],
+        "env": {"MLFLOW_TRACKING_URI": "sqlite:///./.claude/context-diet/mlflow.db"}}}}),
+        encoding="utf-8")
+    subprocess.run(["bash", str(script), str(project)], stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, env=env, timeout=120)
+    entry = json.loads(mcp.read_text(encoding="utf-8"))["mcpServers"]["mlflow-mcp"]
+    first = mcp.read_bytes()
+    subprocess.run(["bash", str(script), str(project)], stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, env=env, timeout=120)
+    ok = (entry["command"] == want
+          and entry["env"]["MLFLOW_TRACKING_URI"] == "sqlite:///./.claude/context-diet/mlflow.db"
+          and mcp.read_bytes() == first)
+    return (ok, "launch %s (%s), URI spelling kept, second run byte-identical"
+            % (entry["command"], "python3 has mlflow" if has else "python3 lacks mlflow"))
+
+
+@gate("timing_gates_wait_for_a_quiet_machine")
+def g_timing_precondition():
+    """Under heavy load a timing gate is blocked, never passed; at low load it runs.
+
+    On 4 Oct the unchanged hooks read 55 ms at normal load and 248-307 ms at
+    load 37-50 on 10 cores. Wall-clock stays the measure; the runner only
+    refuses to take it on an oversubscribed machine, and says so.
+    """
+    def run(load):
+        env = dict(os.environ, CONTEXT_DIET_FAKE_LOAD=str(load), CONTEXT_DIET_QUIET_WAIT_S="0")
+        r = subprocess.run([PY, str(Path(__file__).resolve()), "--only", "budget_runtime_under_2s"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, timeout=300)
+        return r.returncode, r.stdout.decode("utf-8", "replace")
+    code_hi, out_hi = run(999)
+    code_lo, out_lo = run(0)
+    blocked = code_hi != 0 and "\nblocked" in "\n" + out_hi and "1 blocked by load" in out_hi
+    not_passed = not any(ln.startswith("pass") for ln in out_hi.splitlines())
+    ran = any(ln.startswith(("pass", "FAIL")) and "budget_runtime_under_2s" in ln
+              for ln in out_lo.splitlines())
+    return (blocked and not_passed and ran,
+            "load 999: exit %d, blocked=%s, no pass line=%s; load 0: gate ran=%s"
+            % (code_hi, blocked, not_passed, ran))
 
 
 @gate("no_listening_socket")
@@ -2212,6 +2276,64 @@ def g_mlflow_scores():
 
 
 
+# Gates whose verdict is a wall-clock limit. Wall-clock is what a user waits
+# for, so it stays the measure; what changes is when it is taken. On an
+# oversubscribed machine the clock times the other programs, so these gates run
+# only once load per core is under the configured ceiling.
+TIMING_GATES = {
+    "budget_runtime_under_2s", "hook_cost_per_event_under_200ms", "monitor_budget_ms",
+    "session_start_budget_ms", "stop_hook_timing_bound", "install_is_safe_to_run_again",
+}
+_QUIET = {"gave_up": False}
+
+
+def machine_load() -> tuple:
+    """(1-minute load, cores). CONTEXT_DIET_FAKE_LOAD stands in for the load in tests."""
+    fake = os.environ.get("CONTEXT_DIET_FAKE_LOAD")
+    cores = os.cpu_count() or 1
+    if fake:
+        return float(fake), cores
+    try:
+        return os.getloadavg()[0], cores
+    except OSError:
+        return 0.0, cores
+
+
+def busiest_processes() -> str:
+    """What is using the CPU right now, or the command to find out when denied."""
+    for cmd in (["top", "-l", "2", "-o", "cpu", "-stats", "cpu,command", "-n", "6"],
+                ["ps", "-Ao", "pcpu,comm", "-r"]):
+        try:
+            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        lines = r.stdout.decode("utf-8", "replace").strip().splitlines()
+        if r.returncode == 0 and lines:
+            # top prints two samples; the second is the current one (the first
+            # is an average since boot, like ps %CPU).
+            return "; ".join(ln.strip() for ln in lines[-6:])
+    return "process list not readable here; run: top -o cpu"
+
+
+def wait_for_quiet() -> tuple:
+    """(quiet, detail). Waits up to the configured time, once per run."""
+    cfg = _load_config(str(REPO))
+    ceiling = float(cfg.get("timing_gate_max_load_per_core", 1.0))
+    wait_s = float(os.environ.get("CONTEXT_DIET_QUIET_WAIT_S")
+                   or cfg.get("timing_gate_quiet_wait_s", 600))
+    deadline = time.time() + (0 if _QUIET["gave_up"] else wait_s)
+    while True:
+        load, cores = machine_load()
+        if load / cores <= ceiling:
+            return True, ""
+        if time.time() >= deadline:
+            _QUIET["gave_up"] = True
+            return False, ("blocked by load: %.1f on %d cores is over %.1f per core after "
+                           "waiting %.0f s; busiest: %s" % (load, cores, ceiling, wait_s,
+                                                           busiest_processes()))
+        time.sleep(min(15, max(0.0, deadline - time.time())) or 0.1)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="context-diet gates")
     ap.add_argument("--only", default="")
@@ -2229,6 +2351,11 @@ def main() -> int:
     for name, fn in GATES:
         if args.only and args.only not in name:
             continue
+        if name in TIMING_GATES:
+            quiet, why = wait_for_quiet()
+            if not quiet:
+                results.append({"gate": name, "status": "blocked", "detail": why})
+                continue
         try:
             ok, detail = fn()
         except Exception as exc:
@@ -2237,8 +2364,10 @@ def main() -> int:
                         "detail": str(detail)})
 
     # The suite records its own scores in the real store, one run per invocation.
+    # A full run is logged once to the real store. A run with --only is a repair
+    # loop: logging it put one-gate score runs into the store all afternoon.
     scored = ""
-    if results:
+    if results and not args.only:
         try:
             from mlflow_sink import delegate  # noqa: PLC0415
 
@@ -2257,11 +2386,15 @@ def main() -> int:
             sys.stdout.write("%-6s %-*s  %s\n" % (r["status"], width, r["gate"], r["detail"]))
         failed = [r for r in results if r["status"] == "FAIL"]
         skipped = [r for r in results if r["status"] == "skip"]
-        sys.stdout.write("\n%d passed, %d failed, %d skipped\n"
-                         % (len(results) - len(failed) - len(skipped), len(failed), len(skipped)))
+        blocked = [r for r in results if r["status"] == "blocked"]
+        sys.stdout.write("\n%d passed, %d failed, %d skipped%s\n"
+                         % (len(results) - len(failed) - len(skipped) - len(blocked),
+                            len(failed), len(skipped),
+                            ", %d blocked by load" % len(blocked) if blocked else ""))
         if scored:
             sys.stdout.write(scored + "\n")
-    return 1 if any(r["status"] == "FAIL" for r in results) else 0
+    # Blocked is not a pass: a timing limit that was never measured fails the run.
+    return 1 if any(r["status"] in ("FAIL", "blocked") for r in results) else 0
 
 
 if __name__ == "__main__":

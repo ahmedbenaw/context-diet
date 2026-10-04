@@ -2,14 +2,12 @@
   "mcpServers": {
     "mlflow-mcp": {
       "args": [
-        "run",
-        "--with",
-        "mlflow[mcp]>=3.5.1",
+        "-m",
         "mlflow",
         "mcp",
         "run"
       ],
-      "command": "uv",
+      "command": "python3",
       "env": {
         "MLFLOW_TRACKING_URI": "sqlite:///./.claude/context-diet/mlflow.db"
       }

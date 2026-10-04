@@ -51,6 +51,11 @@ DEFAULTS = {
     "session_start_budget_ms": 200,
     "monitor_budget_ms": 50,
     "duplicate_hook_registrations": 1,
+    # Timing gates measure wall-clock, the time a user waits. On a machine whose
+    # load per core is above this, wall-clock measures the other programs, not
+    # the hook, so the gate waits for a quieter moment instead of judging.
+    "timing_gate_max_load_per_core": 1.0,
+    "timing_gate_quiet_wait_s": 600,
 }
 
 
