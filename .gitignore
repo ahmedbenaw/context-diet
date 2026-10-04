@@ -12,8 +12,11 @@ plugins/context-diet/fixture/answer.txt
 .uv-cache/
 .tiktoken-cache/
 
-# Measurement output belongs to the machine that produced it.
-.claude/context-diet/
+# Measurement output belongs to the machine that produced it. At any depth:
+# a pattern with a slash in the middle is anchored to the repo root, and the
+# 0.1.0 hooks wrote state under plugins/, scripts/ and tests/ that git then
+# offered to commit, home paths and all.
+**/.claude/context-diet/
 out/
 **/__pycache__/
 *.pyc

@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -35,6 +36,28 @@ sys.path.insert(0, str(SCRIPTS))
 # interpreter no session ever uses.
 PY = shutil.which("python3") or sys.executable
 GATES = []
+
+# MLflow stays on for the whole suite; it is never switched off. What changes is
+# where it writes: every gate logs into a throwaway store, because gates run the
+# census and report on fixtures, and on 19 Sep that put 74 fixture runs ("probe",
+# "s0", "big") into the real store. The real store is captured first so the
+# suite can record its own scores there at the end.
+from cdlib import load_config as _load_config  # noqa: E402
+from mlflow_sink import resolve_uri as _resolve_uri  # noqa: E402
+
+REAL_MLFLOW_URI = _resolve_uri(os.environ.get("MLFLOW_TRACKING_URI")
+                               or _load_config(str(REPO)).get("mlflow_tracking_uri"), str(REPO))
+GATE_MLFLOW_DIR = Path(tempfile.mkdtemp(prefix="cd-gates-mlflow-"))
+os.environ["MLFLOW_TRACKING_URI"] = "sqlite:///%s" % (GATE_MLFLOW_DIR / "gates.db")
+os.environ["MLFLOW_DISABLE_AGENT_HINT"] = "1"
+os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
+os.environ["DO_NOT_TRACK"] = "true"
+VENV_PY = REPO / ".venv" / "bin" / "python"
+if (importlib.util.find_spec("mlflow") is None and VENV_PY.is_file()
+        and not os.environ.get("CONTEXT_DIET_PYTHON")):
+    # Temp projects have no .venv of their own. Only when this interpreter lacks
+    # MLflow is the repo's .venv pinned, so the gates use the same order as the scripts.
+    os.environ["CONTEXT_DIET_PYTHON"] = str(VENV_PY)
 
 
 def gate(name: str):
@@ -1188,6 +1211,44 @@ def g_occupancy_large_tail():
             % (path.stat().st_size / 1048576, ms))
 
 
+@gate("ab_resume_reruns_only_what_did_not_run")
+def g_ab_resume():
+    """A resumed batch keeps runs that ran and re-runs the rest, and says which.
+
+    The Fable batch lost 34 of 45 runs to a session limit. Re-running all 45
+    pays again for the 11 that worked; dropping the ran=False rows instead
+    would leave holes the report reads as missing configs. The progress line
+    also printed "fail" for a run that never started.
+    """
+    sys.path.insert(0, str(SCRIPTS))
+    import measure  # noqa: PLC0415
+
+    d = Path(tempfile.mkdtemp(prefix="cd-resume-"))
+    led = d / "old.tsv"
+    cols = list(measure.COLUMNS)
+    def row(**kw):
+        base = {c: "" for c in cols}
+        base.update(model="m", config="Fat", task="add-field", trial="1")
+        base.update(kw)
+        return "\t".join(str(base[c]) for c in cols)
+    led.write_text("\n".join([
+        "\t".join(cols),
+        row(trial="1", ran="True", passed="True"),
+        row(trial="2", ran="False", passed="", note="session limit"),
+        row(trial="3", ran="True", passed="False"),
+    ]) + "\n", encoding="utf-8")
+    kept = measure.carried_rows(led)
+    if set(kept) != {("m", "Fat", "add-field", "1"), ("m", "Fat", "add-field", "3")}:
+        return (False, "carried the wrong rows: %s" % sorted(kept))
+    labels = [measure.outcome_label({"ran": False, "passed": ""}),
+              measure.outcome_label({"ran": "False", "passed": ""}),
+              measure.outcome_label({"ran": True, "passed": True}),
+              measure.outcome_label({"ran": "True", "passed": "False"})]
+    if labels != ["did not run", "did not run", "pass", "fail"]:
+        return (False, "labels %s" % labels)
+    return (True, "keeps 2 rows that ran (one pass, one fail), re-runs the 1 that did not; labels %s" % labels)
+
+
 @gate("fixture_doc_matches_the_harness")
 def g_fixture_doc_matches():
     """Every pass command shown in TASKS.md must be the one measure.py runs.
@@ -1882,6 +1943,275 @@ def g_install_round_trip():
                   "settings and data survive the update and the old version is backed up")
 
 
+# ---------------------------------------------------------------- MLflow gates
+#
+# Each gate gets its own SQLite store, so none can see another's runs or the
+# real store. MLflow is required: a missing install fails these gates rather
+# than skipping them, because a skipped integration is an untested one.
+
+SINK = SCRIPTS / "mlflow_sink.py"
+
+
+def _ml_env(tag: str) -> tuple:
+    store = Path(tempfile.mkdtemp(prefix="cd-ml-%s-" % tag)) / "mlflow.db"
+    env = dict(os.environ, MLFLOW_TRACKING_URI="sqlite:///%s" % store,
+               MLFLOW_DISABLE_AGENT_HINT="1", PYTHONPATH=str(SCRIPTS))
+    return env, store
+
+
+def _ml_python():
+    from cdlib import mlflow_python  # noqa: PLC0415
+
+    return mlflow_python(str(REPO))
+
+
+def _sink(env: dict, command: str, payload=None, project: str = ".") -> dict:
+    proc = subprocess.run([_ml_python(), str(SINK), command, "--project", project],
+                          input=json.dumps(payload), capture_output=True, text=True,
+                          env=env, timeout=300)
+    lines = proc.stdout.strip().splitlines()
+    if not lines:
+        raise RuntimeError("sink %s said nothing: %s" % (command, proc.stderr[-300:]))
+    return json.loads(lines[-1])
+
+
+def _store_runs(env: dict, experiment: str) -> list:
+    code = ("import json,mlflow\n"
+            "e=mlflow.get_experiment_by_name(%r)\n"
+            "rs=[] if e is None else mlflow.search_runs([e.experiment_id],output_format='list')\n"
+            "print(json.dumps([{'tags':{k:v for k,v in r.data.tags.items() if not k.startswith('mlflow.')},"
+            "'metrics':r.data.metrics} for r in rs]))" % experiment)
+    proc = subprocess.run([_ml_python(), "-c", code], capture_output=True, text=True,
+                          env=env, timeout=300)
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _ab_row(ts, model, config, task="add-field", trial=1, ran=True, passed=True, cache=1000):
+    return {"ts": str(ts), "model": model, "config": config, "task": task, "trial": str(trial),
+            "fresh_input": "10", "cache_creation": "20", "cache_read": str(cache), "output": "5",
+            "wall_ms": str(1000 + ts % 1000), "tool_calls": "1", "file_reads": "1",
+            "num_turns": "3", "ran": str(ran), "passed": ("True" if passed else "") if ran else "",
+            "note": "" if ran else "agent run failed: You've hit your session limit"}
+
+
+def _write_ledger(path: Path, rows: list) -> Path:
+    cols = list(rows[0].keys())
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write("\t".join(cols) + "\n")
+        for r in rows:
+            fh.write("\t".join(str(r[c]) for c in cols) + "\n")
+    return path
+
+
+@gate("mlflow_installed_and_importable")
+def g_mlflow_installed():
+    """MLflow >= 3.5.1 is importable by the interpreter the scripts hand MLflow work to."""
+    py = _ml_python()
+    if py is None:
+        return (False, "no interpreter can import mlflow; run mlflow_bootstrap.sh --install")
+    proc = subprocess.run([py, "-c", "import mlflow;print(mlflow.__version__)"],
+                          capture_output=True, text=True, timeout=120,
+                          env=dict(os.environ, MLFLOW_DISABLE_AGENT_HINT="1"))
+    version = (proc.stdout.strip().splitlines() or ["0"])[-1]
+    parts = tuple(int(x) for x in version.split(".")[:3] if x.isdigit())
+    if parts < (3, 5, 1):
+        return (False, "mlflow %s is older than 3.5.1" % version)
+    if proc.stderr.strip():
+        return (False, "importing mlflow printed to stderr: %s" % proc.stderr.strip()[:120])
+    return (True, "mlflow %s importable by %s, with no stderr" % (version, Path(py).parent.parent.name))
+
+
+@gate("mlflow_ab_runs_keyed_per_model_and_logged_once")
+def g_mlflow_ab_keyed():
+    """Every trial is one run tagged with its model, config and key; a second log adds nothing.
+
+    A trial that never ran is tagged ran=False and carries no `passed` metric:
+    a zero there would say it ran and failed, which is R1 inside MLflow.
+    """
+    env, _store = _ml_env("ab")
+    rows = [_ab_row(1, "claude-opus-5", "Fat"), _ab_row(2, "claude-opus-5", "Bare"),
+            _ab_row(3, "claude-fable-5", "Fat"), _ab_row(4, "claude-fable-5", "Bare", ran=False)]
+    first = _sink(env, "log-ab", {"records": rows, "batch": "gate-batch"})
+    second = _sink(env, "log-ab", {"records": rows, "batch": "gate-batch"})
+    runs = _store_runs(env, "context-diet/ab")
+    if (first.get("logged"), second.get("logged"), second.get("skipped")) != (4, 0, 4):
+        return (False, "first log %s, second log %s; want 4 then 0 of 4" % (first, second))
+    if len(runs) != 4:
+        return (False, "the store holds %d runs, want 4" % len(runs))
+    for r in runs:
+        t = r["tags"]
+        if not (t.get("model") and t.get("config") and t.get("ab_key")
+                and t.get("batch") == "gate-batch" and t.get("category") == "ab-trial"):
+            return (False, "a run is missing its model, config, key, batch or category: %s" % t)
+    never = [r for r in runs if r["tags"].get("ran") == "False"]
+    if len(never) != 1 or "passed" in never[0]["metrics"]:
+        return (False, "the never-ran trial should be ran=False with no passed metric: %s" % never)
+    models = sorted({r["tags"]["model"] for r in runs})
+    return (True, "4 trials, one run each across %s; the second log added 0; the never-ran trial "
+                  "has no pass or fail" % " and ".join(models))
+
+
+@gate("mlflow_cross_check_compares_trials_not_counts")
+def g_mlflow_cross_check():
+    """report.py agrees with a store that also holds another model, and names a changed value.
+
+    It compared run counts across the whole experiment, so a Fable-only ledger
+    beside an Opus batch read as a divergence that was not there.
+    """
+    env, _store = _ml_env("xc")
+    fable = [_ab_row(10 + i, "claude-fable-5", c, trial=i) for i, c in
+             enumerate(["Fat", "Lean", "Bare"], start=1)]
+    opus = [_ab_row(20 + i, "claude-opus-5", c, trial=i) for i, c in
+            enumerate(["Fat", "Lean", "Bare"], start=1)]
+    _sink(env, "log-ab", {"records": fable + opus, "batch": "gate"})
+    d = Path(tempfile.mkdtemp(prefix="cd-ml-xc-led-"))
+    ledger = _write_ledger(d / "fable.tsv", fable)
+    out = subprocess.run([PY, str(SCRIPTS / "report.py"), "--runs", str(ledger),
+                          "--project", str(d)], capture_output=True, text=True, env=env,
+                         timeout=300).stdout
+    if "MLflow holds all 3 of this ledger's runs, and every one agrees" not in out:
+        return (False, "a one-model ledger beside a two-model store did not agree: %s"
+                % out.strip().splitlines()[-1:])
+    changed = [dict(fable[0], cache_read="999999")] + fable[1:]
+    _write_ledger(ledger, changed)
+    out2 = subprocess.run([PY, str(SCRIPTS / "report.py"), "--runs", str(ledger),
+                           "--project", str(d)], capture_output=True, text=True, env=env,
+                          timeout=300).stdout
+    if "0 are missing from MLflow and 1 disagree" not in out2:
+        return (False, "a changed cache_read was not named: %s" % out2.strip().splitlines()[-1:])
+    return (True, "3 Fable trials agree beside 3 Opus trials in the same experiment; one changed "
+                  "cache_read is reported as 1 disagreeing")
+
+
+@gate("mlflow_drains_the_session_queue_once")
+def g_mlflow_drain():
+    """The Stop hook's queue is logged and removed; queueing the same rows again logs none."""
+    env, _store = _ml_env("drain")
+    project = temp_project("ml-drain")
+    queue = project / ".claude" / "context-diet" / "mlflow-pending.jsonl"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    rows = [{"ts": 100 + i, "session_id": "00000000-0000-0000-0000-00000000000%d" % i,
+             "cwd": str(project), "turns": 3, "cache_read": 500, "model": "claude-opus-5"}
+            for i in range(2)]
+    text = "".join(json.dumps(r) + "\n" for r in rows)
+    queue.write_text(text, encoding="utf-8")
+    first = _sink(env, "drain", project=str(project))
+    gone = not queue.exists()
+    queue.write_text(text, encoding="utf-8")
+    second = _sink(env, "drain", project=str(project))
+    runs = _store_runs(env, "context-diet/sessions")
+    if (first.get("drained"), gone, second.get("drained"), queue.exists(), len(runs)) != \
+            (2, True, 0, False, 2):
+        return (False, "drained %s then %s, queue removed %s/%s, %d runs; want 2, 0, removed "
+                       "both times, 2 runs" % (first.get("drained"), second.get("drained"),
+                                               gone, not queue.exists(), len(runs)))
+    return (True, "2 queued sessions logged and the queue removed; the same 2 again logged 0")
+
+
+@gate("mlflow_census_one_run_per_model")
+def g_mlflow_census():
+    """A census run appears as one MLflow run per model, one metric per H column (Part 7.5)."""
+    env, _store = _ml_env("census")
+    out = Path(tempfile.mkdtemp(prefix="cd-ml-census-"))
+    project = temp_project("ml-census")
+    cmd = [PY, str(SCRIPTS / "context_census.py"), "--projects", str(FIXTURES / "transcripts"),
+           "--out", str(out), "--project", str(project)]
+    subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
+    header = (out / "census.tsv").read_text(encoding="utf-8").splitlines()[0].split("\t")
+    models = {line.split("\t")[header.index("model")] for line in
+              (out / "census.tsv").read_text(encoding="utf-8").splitlines()[1:] if line.strip()}
+    runs = _store_runs(env, "context-diet/census")
+    subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
+    again = _store_runs(env, "context-diet/census")
+    hcols = {c for c in header if c[:1] == "h" and c[1:2].isdigit()}
+    if sorted(r["tags"].get("model") for r in runs) != sorted(models):
+        return (False, "census runs %s, models in the census %s"
+                % (sorted(r["tags"].get("model") for r in runs), sorted(models)))
+    # A column is owed a metric only where that model has a number in it: a
+    # hit ratio is "None" for a model that cached nothing, and None is not zero.
+    lines = [dict(zip(header, ln.split("\t"))) for ln in
+             (out / "census.tsv").read_text(encoding="utf-8").splitlines()[1:] if ln.strip()]
+
+    def numeric_cols(model):
+        cols = set()
+        for row in lines:
+            if row.get("model") != model:
+                continue
+            for c in hcols:
+                try:
+                    float(row.get(c) or 0)
+                    cols.add(c)
+                except ValueError:
+                    pass
+        return cols
+
+    missing = [r["tags"]["model"] for r in runs
+               if not numeric_cols(r["tags"]["model"]) <= set(r["metrics"])]
+    if missing:
+        return (False, "runs for %s lack an H column metric" % missing)
+    if len(again) != len(runs):
+        return (False, "the same census logged twice made %d runs, want %d" % (len(again), len(runs)))
+    return (True, "%d models, one run each with every numeric H column (of %d); the same census "
+                  "again added none" % (len(runs), len(hcols)))
+
+
+@gate("mlflow_backfill_labels_old_runs_without_deleting")
+def g_mlflow_backfill():
+    """Runs logged before keys existed are labelled in place, ledger rows are added once.
+
+    Labels: a run matching a ledger row gets its key; a non-Claude model is a
+    test artifact; an unmatched Claude run has no ledger row. Nothing is deleted.
+    """
+    env, _store = _ml_env("backfill")
+    rows = [_ab_row(31, "claude-opus-5", "Fat"), _ab_row(32, "claude-opus-5", "Lean")]
+    legacy = ("import mlflow\n"
+              "mlflow.set_experiment('context-diet/ab')\n"
+              "def log(model, cache, wall):\n"
+              "    with mlflow.start_run():\n"
+              "        mlflow.set_tags({'model': model, 'config': 'Fat', 'task': 'add-field', 'trial': '1'})\n"
+              "        mlflow.log_metric('cache_read', cache); mlflow.log_metric('wall_ms', wall)\n"
+              "log('claude-opus-5', 1000, 1031)\n"
+              "log('probe', 0, 5)\n"
+              "log('claude-opus-5', 7, 7)\n")
+    subprocess.run([_ml_python(), "-c", legacy], capture_output=True, env=env, timeout=300)
+    d = Path(tempfile.mkdtemp(prefix="cd-ml-bf-"))
+    ledger = _write_ledger(d / "runs-gate.tsv", rows)
+    cmd = [PY, str(SCRIPTS / "mlflow_backfill.py"), "--project", str(d), "--ab-ledger", str(ledger),
+           "--sessions", str(d / "none.tsv")]
+    first = json.loads(subprocess.run(cmd, capture_output=True, text=True, env=env,
+                                      timeout=300).stdout)
+    second = json.loads(subprocess.run(cmd, capture_output=True, text=True, env=env,
+                                       timeout=300).stdout)
+    runs = _store_runs(env, "context-diet/ab")
+    cats = sorted(r["tags"].get("category", "") for r in runs)
+    want = ["ab-trial", "ab-trial", "no-ledger", "test-artifact"]
+    if cats != want:
+        return (False, "categories %s, want %s" % (cats, want))
+    if (first["legacy"]["adopted"], first["ab"]["logged"], second["ab"]["logged"],
+            second["legacy"]["adopted"]) != (1, 1, 0, 0):
+        return (False, "first %s, second %s" % (first, second))
+    return (True, "3 old runs kept and labelled (1 matched its ledger row, 1 test artifact, "
+                  "1 with no ledger row); 1 missing trial added; the second backfill added none")
+
+
+@gate("mlflow_gate_scores_logged")
+def g_mlflow_scores():
+    """The suite's own results become one MLflow run with a metric per scorer."""
+    env, _store = _ml_env("scores")
+    results = [{"gate": "a", "status": "pass", "detail": "ok"},
+               {"gate": "b", "status": "FAIL", "detail": "no"},
+               {"gate": "c", "status": "skip", "detail": "-"}]
+    out = _sink(env, "log-scores", results)
+    runs = _store_runs(env, "context-diet/scorers")
+    if not out.get("available") or len(runs) != 1:
+        return (False, "log-scores said %s and the store holds %d runs" % (out, len(runs)))
+    m = runs[0]["metrics"]
+    if (m.get("a"), m.get("b"), m.get("scorers_passed"), m.get("scorers_total")) != (1.0, 0.0, 1.0, 2.0):
+        return (False, "metrics %s" % m)
+    return (True, "one run: a=1, b=0, 1 of 2 scorers passed, the skip not counted")
+
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="context-diet gates")
     ap.add_argument("--only", default="")
@@ -1906,6 +2236,19 @@ def main() -> int:
         results.append({"gate": name, "status": "skip" if ok is None else ("pass" if ok else "FAIL"),
                         "detail": str(detail)})
 
+    # The suite records its own scores in the real store, one run per invocation.
+    scored = ""
+    if results:
+        try:
+            from mlflow_sink import delegate  # noqa: PLC0415
+
+            done = delegate("log-scores", results, str(REPO),
+                            env={"MLFLOW_TRACKING_URI": REAL_MLFLOW_URI})
+            scored = ("scores logged to MLflow (%s)" % REAL_MLFLOW_URI.split("/")[-1]
+                      if done.get("available") else "scores NOT logged to MLflow: %s" % done)
+        except Exception as exc:  # noqa: BLE001
+            scored = "scores NOT logged to MLflow: %s" % type(exc).__name__
+
     if args.json:
         sys.stdout.write(json.dumps(results, indent=2) + "\n")
     else:
@@ -1916,6 +2259,8 @@ def main() -> int:
         skipped = [r for r in results if r["status"] == "skip"]
         sys.stdout.write("\n%d passed, %d failed, %d skipped\n"
                          % (len(results) - len(failed) - len(skipped), len(failed), len(skipped)))
+        if scored:
+            sys.stdout.write(scored + "\n")
     return 1 if any(r["status"] == "FAIL" for r in results) else 0
 
 

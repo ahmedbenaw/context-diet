@@ -9,12 +9,26 @@
 # user to run themselves once they have seen the cost.
 #
 # Run twice and the .mcp.json is byte-identical.
+#
+# Usage: mlflow_bootstrap.sh [--install] [REPO]
+# Without --install it only checks and prints. With --install, when no
+# interpreter can import MLflow, it creates REPO/.venv with uv and installs
+# mlflow[mcp] there, never into system site-packages.
 
 set -euo pipefail
 
+INSTALL=0
+REPO_ARG=""
+for arg in "$@"; do
+  case "$arg" in
+    --install) INSTALL=1 ;;
+    *) REPO_ARG="$arg" ;;
+  esac
+done
+
 # Absolutise. A relative REPO leaks a relative path into the tracking URI and
 # into the promote command, which then resolve against whatever cwd runs them.
-REPO="$(cd "${1:-$(pwd)}" && pwd)"
+REPO="$(cd "${REPO_ARG:-$(pwd)}" && pwd)"
 # MLflow 3.16 put the filesystem store into maintenance mode and refuses a
 # file:// URI, so the default is a local SQLite file. It must be the SAME store
 # the Python sink writes to, or the MCP server reads an empty database while
@@ -50,8 +64,10 @@ if ! command -v uv >/dev/null 2>&1; then
   STATUS="unavailable"
 fi
 
-if [ "$STATUS" = "ok" ]; then
-  if ! python3 - <<'PY' >/dev/null 2>&1
+# Same order as cdlib.mlflow_python: python3 first, then the project's .venv.
+VENV_PY="${REPO}/.venv/bin/python"
+has_mlflow() {
+  "$1" - <<'PY' >/dev/null 2>&1
 import sys
 try:
     import mlflow
@@ -60,9 +76,27 @@ except Exception:
 parts = tuple(int(x) for x in mlflow.__version__.split(".")[:3] if x.isdigit())
 sys.exit(0 if parts >= (3, 5, 1) else 1)
 PY
-  then
-    say "mlflow >= 3.5.1 not importable by python3; scorers still run as plain checks"
-    say "install it into this repo's environment with: uv pip install 'mlflow[mcp]>=3.5.1'"
+}
+mlflow_found() {
+  has_mlflow python3 || { [ -x "$VENV_PY" ] && has_mlflow "$VENV_PY"; }
+}
+
+if [ "$STATUS" = "ok" ] && ! mlflow_found; then
+  if [ "$INSTALL" = "1" ]; then
+    say "installing mlflow[mcp] into ${REPO}/.venv"
+    # A failed step is reported, never a crash: set -e would otherwise end the
+    # run before the .mcp.json step and the status line.
+    if { [ -x "$VENV_PY" ] || uv venv "${REPO}/.venv" >/dev/null; } \
+        && uv pip install --python "$VENV_PY" 'mlflow[mcp]>=3.5.1' >/dev/null \
+        && mlflow_found; then
+      say "mlflow installed into ${REPO}/.venv"
+    else
+      say "the install did not leave an importable mlflow; scorers still run as plain checks"
+      STATUS="unavailable"
+    fi
+  else
+    say "mlflow >= 3.5.1 not importable by python3 or ${REPO}/.venv; scorers still run as plain checks"
+    say "install it into this repo's .venv with: $0 --install ${REPO}"
     STATUS="unavailable"
   fi
 fi

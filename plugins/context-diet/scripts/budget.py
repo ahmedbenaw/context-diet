@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -239,7 +241,12 @@ def main() -> int:
     report = {"tokenizer": tok.name, "project": str(project), "groups": {}, "mcp": []}
     for group, paths in groups.items():
         index_only = group == "skills index"
-        measured = [measure_file(p, tok, index_only=index_only) for p in paths]
+        # tiktoken releases the GIL while it encodes, so files are measured on a
+        # thread pool. Serially, the real tokeniser spent about 1.4 s of CPU here
+        # and pushed /budget past its 2 s gate. map() keeps the input order.
+        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+            measured = list(pool.map(lambda q: measure_file(q, tok, index_only=index_only),
+                                     paths))
         report["groups"][group] = {
             "always_on": group in ALWAYS_ON,
             "files": measured,

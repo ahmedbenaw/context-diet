@@ -260,30 +260,22 @@ def render(rows: list, cfg: dict, markdown: bool) -> str:
 
 
 def cross_check(rows: list, cfg: dict, project: str = ".") -> str:
-    """The ledger is the source. MLflow is compared to it and divergence is named."""
-    try:
-        import mlflow  # noqa: PLC0415
-    except Exception:
-        return "MLflow is not installed, so the ledger is the only record. Nothing to cross-check."
-    try:
-        from mlflow_sink import resolve_uri  # noqa: PLC0415
+    """The ledger is the source. MLflow is compared to it trial by trial.
 
-        # load_config never writes a "_project" key, so the old lookup always
-        # fell back to the process cwd and silently cross-checked against the
-        # wrong tracking store. The project is threaded in explicitly now.
-        uri = resolve_uri(cfg.get("mlflow_tracking_uri"), project)
-        if uri:
-            mlflow.set_tracking_uri(uri)
-        exp = mlflow.get_experiment_by_name("context-diet/ab")
-        if exp is None:
-            return "MLflow has no context-diet/ab experiment yet, so there is nothing to compare."
-        runs = mlflow.search_runs([exp.experiment_id])
-        if len(runs) != len(rows):
-            return ("Divergence: the ledger holds %d runs and MLflow holds %d. The ledger is the "
-                    "source of truth. This is reported, not reconciled." % (len(rows), len(runs)))
-        return "MLflow holds %d runs and agrees with the ledger." % len(runs)
-    except Exception as exc:
+    report.py runs under python3, which has no MLflow on this machine, so the
+    comparison runs in mlflow_sink under the interpreter that has it.
+    """
+    try:
+        from mlflow_sink import delegate  # noqa: PLC0415
+
+        out = delegate("cross-check", rows, project)
+    except Exception as exc:  # noqa: BLE001 - the ledger stands alone on any failure
         return "MLflow cross-check failed (%s). The ledger stands alone." % type(exc).__name__
+    if not out.get("available"):
+        if out.get("error"):
+            return "MLflow cross-check failed (%s). The ledger stands alone." % out["error"]
+        return "MLflow is not installed, so the ledger is the only record. Nothing to cross-check."
+    return out.get("text", "")
 
 
 def main() -> int:
@@ -314,9 +306,9 @@ def main() -> int:
     # Drain the Stop hook's queued session rows first. The hook cannot import
     # MLflow itself, so the command layer is where the queue is emptied.
     try:
-        from mlflow_sink import drain_pending  # noqa: PLC0415
+        from mlflow_sink import delegate  # noqa: PLC0415
 
-        drained = drain_pending(cfg, args.project)
+        drained = delegate("drain", None, args.project).get("drained", 0)
         if drained:
             sys.stdout.write("logged %d queued session row(s) to MLflow\n" % drained)
     except Exception:

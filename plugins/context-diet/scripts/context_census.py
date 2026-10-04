@@ -597,6 +597,17 @@ def main() -> int:
     sys.stdout.write(
         "context-diet census: %d transcripts, %d rows -> %s\n" % (len(files), len(rows), tsv)
     )
+    # One MLflow run per model, one metric per H column (plan Part 7.5). Runs
+    # under the interpreter that has MLflow; the census itself stays stdlib.
+    try:
+        from mlflow_sink import delegate  # noqa: PLC0415
+
+        logged = delegate("log-census", str(tsv.resolve()), args.project)
+        if logged.get("runs"):
+            sys.stdout.write("logged the census to MLflow: %d run(s), one per model\n"
+                             % logged["runs"])
+    except Exception:
+        pass
     return 0
 
 

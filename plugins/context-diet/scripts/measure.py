@@ -479,6 +479,38 @@ def append_row(path: Path, record: dict) -> None:
         fh.write("\t".join(cell(record.get(k)) for k in COLUMNS) + "\n")
 
 
+def outcome_label(record: dict) -> str:
+    """The word printed for one finished trial.
+
+    A run the agent never started used to print "fail", the same word as a
+    task the agent got wrong. Thirty-three Fable runs stopped by a session
+    limit read as a wall of failures in the log while the ledger, correctly,
+    held no pass or fail for them.
+    """
+    if not record.get("ran") or record.get("ran") == "False":
+        return "did not run"
+    return "pass" if record.get("passed") in (True, "True") else "fail"
+
+
+def carried_rows(ledger: Path) -> dict:
+    """Rows of an earlier ledger that ran, keyed by (model, config, task, trial).
+
+    Only ran=True rows are carried. A row that never ran is the reason to
+    resume, so it is run again rather than copied forward as a hole.
+    """
+    keep = {}
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return keep
+    header = lines[0].split("\t")
+    for line in lines[1:]:
+        row = dict(zip(header, line.split("\t")))
+        if row.get("ran") != "True":
+            continue
+        keep[(row["model"], row["config"], row["task"], str(row["trial"]))] = row
+    return keep
+
+
 def do_run(args) -> int:
     ws = prepare_workspace(args.project)
     cfg = load_config(args.project)
@@ -498,6 +530,19 @@ def do_run(args) -> int:
     out = state_dir(args.project) / "ab"
     out.mkdir(parents=True, exist_ok=True)
     results_path = out / "runs.tsv"
+    # The batch every trial in this run is tagged with in MLflow. runs.tsv is
+    # renamed to a dated file afterwards, so its stem would name nothing.
+    batch = "runs-%s-%s" % (time.strftime("%Y-%m-%d"), "+".join(models))
+    carried = {}
+    if args.resume:
+        ledger = Path(args.resume).resolve()
+        # runs.tsv is truncated just below, so resuming from it would erase the
+        # very rows it means to keep.
+        if ledger == results_path.resolve():
+            sys.stderr.write("copy runs.tsv to another name before resuming from it\n")
+            return 2
+        carried = carried_rows(ledger)
+        sys.stdout.write("resuming: %d runs that ran are kept from %s\n" % (len(carried), ledger.name))
     # The header used to be taken from the first record's keys, while num_turns
     # is only added when the agent's JSON parses. One unparsed trial late in a
     # run then raised KeyError after every paid run had already happened, with
@@ -513,20 +558,33 @@ def do_run(args) -> int:
         for config in CONFIGS:
             for task in TASKS:
                 for trial in range(1, args.trials + 1):
-                    rec = run_trial(model, config, task, trial, args.dry_run, ws)
+                    old = carried.get((model, config, task["id"], str(trial)))
+                    if old is not None:
+                        rec = dict(old)
+                        rec["note"] = ("%s; carried over from %s" % (old.get("note", ""), Path(args.resume).name)).lstrip("; ")
+                    else:
+                        rec = run_trial(model, config, task, trial, args.dry_run, ws)
                     records.append(rec)
                     append_row(results_path, rec)
                     done += 1
                     sys.stdout.write(
                         "[%d/%d] %s %s %s trial %d: %s\n"
                         % (done, total, model, config, task["id"], trial,
-                           "pass" if rec["passed"] else "fail")
+                           outcome_label(rec) + (" (kept)" if old is not None else ""))
                     )
                     sys.stdout.flush()
+                    # Carried rows are logged too. "Already logged when it first
+                    # ran" was false for every carried row on 4 Oct: MLflow was
+                    # not importable then. The trial key makes a second log a
+                    # no-op, so logging again is safe and logging never is not.
+                    # A dry run measures nothing, so it logs nothing. The 30
+                    # "probe" runs in the 19 Sep store were dry runs.
+                    if args.dry_run:
+                        continue
                     try:
-                        from mlflow_sink import log_ab_run  # noqa: PLC0415
+                        from mlflow_sink import delegate  # noqa: PLC0415
 
-                        log_ab_run(rec, cfg)
+                        delegate("log-ab", {"records": [rec], "batch": batch}, args.project)
                     except Exception:
                         pass
 
@@ -552,6 +610,8 @@ def main() -> int:
     r.add_argument("--trials", type=int, default=3)
     r.add_argument("--project", default=".")
     r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--resume", metavar="LEDGER",
+                   help="keep the runs that ran in this earlier ledger; run only the rest")
     r.set_defaults(fn=do_run)
     t = sub.add_parser("tasks")
     t.set_defaults(fn=do_tasks)

@@ -242,7 +242,10 @@ class Tokenizer:
             return 0
         if self._enc is not None:
             try:
-                return len(self._enc.encode(text, disallowed_special=()))
+                # encode_ordinary gives the same count as encode(disallowed_special=())
+                # (special-token text is encoded as plain text either way) and skips
+                # the special-token scan, about 25% faster on the skill files here.
+                return len(self._enc.encode_ordinary(text))
             except Exception:
                 pass
         return (len(text) + 3) // 4
@@ -612,3 +615,44 @@ def hit_ratio(created_total: int, read_total: int):
     """
     total = created_total + read_total
     return (read_total / float(total)) if total else None
+
+
+_MLFLOW_PYTHON: dict = {}
+
+
+def mlflow_python(cwd: str | None = None):
+    """The interpreter that can import MLflow, or None. Never imports MLflow.
+
+    The commands start `python3`. Since 4 Oct that interpreter has MLflow in its
+    user site (Ben installed mlflow[mcp] there), so it is tried first; the
+    project's .venv is the fallback for a machine where python3 lacks it. Order:
+    CONTEXT_DIET_PYTHON when set, then this interpreter, then the project's
+    .venv. Each candidate is probed with
+    find_spec in a subprocess: importing MLflow to find out takes seconds and
+    prints to stderr. Never called from a hook.
+    """
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    root = str(project_root(cwd))
+    if root in _MLFLOW_PYTHON:
+        return _MLFLOW_PYTHON[root]
+    cands = [os.environ.get("CONTEXT_DIET_PYTHON") or "",
+             sys.executable,
+             str(Path(root) / ".venv" / "bin" / "python")]
+    found = None
+    for cand in cands:
+        if not cand or not Path(cand).is_file():
+            continue
+        try:
+            probe = subprocess.run(
+                [cand, "-c", "import importlib.util,sys;"
+                             "sys.exit(importlib.util.find_spec('mlflow') is None)"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0:
+            found = cand
+            break
+    _MLFLOW_PYTHON[root] = found
+    return found
